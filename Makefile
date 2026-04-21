@@ -35,6 +35,9 @@ e2e:
 run-fomc:
 	python -m news_archive.collectors.run fed_fomc_statements
 
+run-fed-speeches:
+	python -m news_archive.collectors.run fed_speeches
+
 clean:
 	rm -rf build dist *.egg-info .pytest_cache .ruff_cache .mypy_cache
 	find . -type d -name __pycache__ -exec rm -rf {} +
