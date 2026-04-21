@@ -41,12 +41,12 @@ def _default_headers(extra: dict[str, str] | None = None) -> dict[str, str]:
 
 
 class RetryableHTTPError(Exception):
-    """Wraps a 5xx response so tenacity treats it as retryable."""
+    """Wraps a retryable response (5xx or 429) so tenacity retries it."""
 
 
 @retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=1, max=10),
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
     retry=retry_if_exception_type((httpx.TransportError, RetryableHTTPError)),
     reraise=True,
 )
@@ -56,10 +56,10 @@ def fetch_bytes(
     headers: dict[str, str] | None = None,
     params: dict[str, Any] | None = None,
 ) -> bytes:
-    """GET `url` and return raw bytes. Raises on 4xx (non-retryable); retries on 5xx/network."""
+    """GET `url` and return raw bytes. Retries on 429 + 5xx + network errors; raises on other 4xx."""
     with httpx.Client(timeout=DEFAULT_TIMEOUT, follow_redirects=True) as client:
         response = client.get(url, headers=_default_headers(headers), params=params)
-        if 500 <= response.status_code < 600:
+        if response.status_code == 429 or 500 <= response.status_code < 600:
             raise RetryableHTTPError(f"{url} returned {response.status_code}")
         response.raise_for_status()
         return response.content

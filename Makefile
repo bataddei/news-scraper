@@ -53,6 +53,9 @@ run-prn:
 run-gnw:
 	python -m news_archive.collectors.run wire_globenewswire
 
+run-ffcal:
+	python -m news_archive.collectors.run econ_calendar_ff
+
 clean:
 	rm -rf build dist *.egg-info .pytest_cache .ruff_cache .mypy_cache
 	find . -type d -name __pycache__ -exec rm -rf {} +
