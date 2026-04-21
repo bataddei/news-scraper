@@ -56,6 +56,9 @@ run-gnw:
 run-ffcal:
 	python -m news_archive.collectors.run econ_calendar_ff
 
+run-gdelt:
+	python -m news_archive.collectors.run gdelt_gkg
+
 clean:
 	rm -rf build dist *.egg-info .pytest_cache .ruff_cache .mypy_cache
 	find . -type d -name __pycache__ -exec rm -rf {} +
