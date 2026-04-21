@@ -28,10 +28,10 @@ insert into news_archive.sources (slug, name, tier, source_type, base_url, activ
 
 ('treasury_press',
  'US Treasury — press releases',
- 1, 'rss',
+ 1, 'scraper',
  'https://home.treasury.gov/news/press-releases',
  true,
- 'Treasury announcements. Target cadence: hourly.'),
+ 'Treasury announcements. Target cadence: hourly. No dedicated RSS feed, so we scrape the Drupal listing page.'),
 
 ('sec_edgar_mag7',
  'SEC EDGAR — Mag 7 filings',

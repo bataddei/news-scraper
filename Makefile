@@ -41,6 +41,9 @@ run-fed-speeches:
 run-bls:
 	python -m news_archive.collectors.run bls_releases
 
+run-treasury:
+	python -m news_archive.collectors.run treasury_press
+
 clean:
 	rm -rf build dist *.egg-info .pytest_cache .ruff_cache .mypy_cache
 	find . -type d -name __pycache__ -exec rm -rf {} +
