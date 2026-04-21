@@ -32,6 +32,9 @@ migrate:
 e2e:
 	python -m news_archive.scripts.end_to_end_test
 
+run-fomc:
+	python -m news_archive.collectors.run fed_fomc_statements
+
 clean:
 	rm -rf build dist *.egg-info .pytest_cache .ruff_cache .mypy_cache
 	find . -type d -name __pycache__ -exec rm -rf {} +
