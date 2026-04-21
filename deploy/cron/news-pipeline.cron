@@ -18,7 +18,9 @@ PATH=/opt/news-scraper/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/b
 # Fed speeches and testimony: hourly. Offset by 10 minutes from the top of the
 # hour so we don't collide with any :00 job if more get added later.
 10 * * * *  news cd /opt/news-scraper && .venv/bin/python -m news_archive.collectors.run fed_speeches
-# 0 * * * *   news cd /opt/news-scraper && .venv/bin/python -m news_archive.collectors.run bls_releases
+# BLS economic releases: hourly at :20. Brief says "hourly on release days,
+# daily otherwise" — we just run hourly; dedup makes the extra polls cheap.
+20 * * * *  news cd /opt/news-scraper && .venv/bin/python -m news_archive.collectors.run bls_releases
 # 0 * * * *   news cd /opt/news-scraper && .venv/bin/python -m news_archive.collectors.run treasury_press
 # */15 * * * * news cd /opt/news-scraper && .venv/bin/python -m news_archive.collectors.run sec_edgar_mag7
 

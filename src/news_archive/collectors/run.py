@@ -10,6 +10,7 @@ from __future__ import annotations
 import sys
 
 from news_archive.collectors.base import BaseCollector
+from news_archive.collectors.bls_releases import BLSReleasesCollector
 from news_archive.collectors.fed_fomc_statements import FOMCStatementsCollector
 from news_archive.collectors.fed_speeches import FedSpeechesCollector
 from news_archive.db import close_pool
@@ -20,8 +21,8 @@ log = get_logger(__name__)
 COLLECTORS: dict[str, type[BaseCollector]] = {
     "fed_fomc_statements": FOMCStatementsCollector,
     "fed_speeches": FedSpeechesCollector,
+    "bls_releases": BLSReleasesCollector,
     # Week 2 additions will register more here:
-    # "bls_releases": BLSReleasesCollector,
     # "treasury_press": TreasuryPressCollector,
     # "sec_edgar_mag7": SECEdgarCollector,
 }

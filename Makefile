@@ -38,6 +38,9 @@ run-fomc:
 run-fed-speeches:
 	python -m news_archive.collectors.run fed_speeches
 
+run-bls:
+	python -m news_archive.collectors.run bls_releases
+
 clean:
 	rm -rf build dist *.egg-info .pytest_cache .ruff_cache .mypy_cache
 	find . -type d -name __pycache__ -exec rm -rf {} +
