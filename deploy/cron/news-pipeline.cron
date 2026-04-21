@@ -1,0 +1,29 @@
+# Cron schedule for collectors that run on a cadence rather than as long-lived services.
+# Install: sudo cp deploy/cron/news-pipeline.cron /etc/cron.d/news-pipeline
+#
+# Format: m h dom mon dow user command
+#
+# All commands source /opt/news-scraper/.env so they inherit SUPABASE_DB_URL etc.
+
+SHELL=/bin/bash
+PATH=/opt/news-scraper/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# ---- Healthcheck heartbeat (hourly) ----
+# Requires HEALTHCHECKS_URL set in .env.
+0 * * * * news /opt/news-scraper/deploy/healthcheck.sh >/dev/null 2>&1
+
+# ---- Tier 1 collectors (cadences per project-brief.md §Week 2) ----
+# Commented out until Week 2 ships the actual collector modules.
+# 0 */4 * * * news cd /opt/news-scraper && .venv/bin/python -m news_archive.collectors.run fed_fomc_statements
+# 0 * * * *   news cd /opt/news-scraper && .venv/bin/python -m news_archive.collectors.run fed_speeches
+# 0 * * * *   news cd /opt/news-scraper && .venv/bin/python -m news_archive.collectors.run bls_releases
+# 0 * * * *   news cd /opt/news-scraper && .venv/bin/python -m news_archive.collectors.run treasury_press
+# */15 * * * * news cd /opt/news-scraper && .venv/bin/python -m news_archive.collectors.run sec_edgar_mag7
+
+# ---- Tier 2 collectors (Week 3) ----
+# 30 2 * * *  news cd /opt/news-scraper && .venv/bin/python -m news_archive.collectors.run gdelt_gkg
+# 5 * * * *   news cd /opt/news-scraper && .venv/bin/python -m news_archive.collectors.run reuters_top
+# (etc.)
+
+# ---- Week 4: daily integrity report at 08:00 UTC ----
+# 0 8 * * *   news cd /opt/news-scraper && .venv/bin/python -m news_archive.scripts.daily_report

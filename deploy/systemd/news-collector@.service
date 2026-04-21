@@ -1,0 +1,42 @@
+# systemd template unit for news collectors.
+# One instance per source: `systemctl enable news-collector@fed_speeches.service`.
+# The instance name (`%i`) is passed to the entrypoint as the source slug.
+#
+# Install on droplet:
+#   sudo cp deploy/systemd/news-collector@.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now news-collector@<slug>.service
+
+[Unit]
+Description=News collector (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=news
+Group=news
+WorkingDirectory=/opt/news-scraper
+EnvironmentFile=/opt/news-scraper/.env
+ExecStart=/opt/news-scraper/.venv/bin/python -m news_archive.collectors.run %i
+Restart=on-failure
+RestartSec=30s
+# Don't let a wedged collector spin forever
+TimeoutStopSec=30s
+# Cap resource usage (1GB droplet)
+MemoryHigh=256M
+MemoryMax=384M
+# Logs go to journald; logrotate handles /var/log/news-pipeline/*.log separately
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=news-collector-%i
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/log/news-pipeline
+
+[Install]
+WantedBy=multi-user.target
