@@ -29,9 +29,13 @@ PATH=/opt/news-scraper/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/b
 */15 * * * * news cd /opt/news-scraper && .venv/bin/python -m news_archive.collectors.run sec_edgar_mag7
 
 # ---- Tier 2 collectors (Week 3) ----
+# PR Newswire: all news releases feed. Updates continuously.
+5 * * * *   news cd /opt/news-scraper && .venv/bin/python -m news_archive.collectors.run wire_pr_newswire
+# GlobeNewswire: public companies feed. Ticker tags make Mag 7 filtering viable at query time.
+15 * * * *  news cd /opt/news-scraper && .venv/bin/python -m news_archive.collectors.run wire_globenewswire
 # 30 2 * * *  news cd /opt/news-scraper && .venv/bin/python -m news_archive.collectors.run gdelt_gkg
-# 5 * * * *   news cd /opt/news-scraper && .venv/bin/python -m news_archive.collectors.run reuters_top
-# (etc.)
+# Business Wire, Reuters, AP: public RSS returns 403 or has been sunset. Need a
+# paid feed or alternate access path before enabling.
 
 # ---- Week 4: daily integrity report at 08:00 UTC ----
 # 0 8 * * *   news cd /opt/news-scraper && .venv/bin/python -m news_archive.scripts.daily_report

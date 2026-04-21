@@ -15,6 +15,10 @@ from news_archive.collectors.fed_fomc_statements import FOMCStatementsCollector
 from news_archive.collectors.fed_speeches import FedSpeechesCollector
 from news_archive.collectors.sec_edgar_mag7 import SECEdgarMag7Collector
 from news_archive.collectors.treasury_press import TreasuryPressCollector
+from news_archive.collectors.wires import (
+    GlobeNewswireCollector,
+    PRNewswireCollector,
+)
 from news_archive.db import close_pool
 from news_archive.logging_config import configure_logging, get_logger
 
@@ -26,6 +30,10 @@ COLLECTORS: dict[str, type[BaseCollector]] = {
     "bls_releases": BLSReleasesCollector,
     "treasury_press": TreasuryPressCollector,
     "sec_edgar_mag7": SECEdgarMag7Collector,
+    "wire_pr_newswire": PRNewswireCollector,
+    "wire_globenewswire": GlobeNewswireCollector,
+    # wire_business_wire: defined but not registered — Business Wire returns 403
+    # to public crawlers. Re-enable once we have viable access.
 }
 
 

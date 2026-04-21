@@ -47,6 +47,12 @@ run-treasury:
 run-sec:
 	python -m news_archive.collectors.run sec_edgar_mag7
 
+run-prn:
+	python -m news_archive.collectors.run wire_pr_newswire
+
+run-gnw:
+	python -m news_archive.collectors.run wire_globenewswire
+
 clean:
 	rm -rf build dist *.egg-info .pytest_cache .ruff_cache .mypy_cache
 	find . -type d -name __pycache__ -exec rm -rf {} +
