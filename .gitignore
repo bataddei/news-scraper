@@ -1,0 +1,49 @@
+# Secrets — NEVER commit
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+credentials.json
+service-account*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Claude Code — local-only settings (user-specific). Shared project settings
+# in .claude/settings.json MAY be committed; the .local.json override must not.
+.claude/settings.local.json
+
+# Local data / logs (pipeline should never write these to repo)
+logs/
+*.log
+data/
+tmp/
+local_dumps/
