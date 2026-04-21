@@ -57,6 +57,7 @@ class BaseCollector(ABC):
         run_log = self.logger.bind(run_id=run.id)
         run_log.info("collection_run.start")
 
+        failed = 0
         try:
             for article, entities in self.collect():
                 run.articles_seen += 1
@@ -67,13 +68,19 @@ class BaseCollector(ABC):
                     else:
                         run.articles_inserted += 1
                 except Exception as e:
+                    failed += 1
                     run_log.warning(
                         "article.insert_failed",
                         error=str(e),
                         url=article.url,
                         headline=article.headline[:120],
                     )
-            run.status = "success"
+            # Partial status if any per-article insert failed. "success" means
+            # every item we saw was either written or recognised as a dup —
+            # anything less must surface in Week 4's gap / integrity report.
+            run.status = "partial" if failed > 0 else "success"
+            if failed > 0:
+                run.error_message = f"{failed} per-article insert(s) failed; see warnings"
         except Exception as e:
             run.status = "failed"
             run.error_message = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
@@ -87,5 +94,6 @@ class BaseCollector(ABC):
                 seen=run.articles_seen,
                 inserted=run.articles_inserted,
                 duplicate=run.articles_duplicate,
+                failed=failed,
             )
         return run

@@ -23,6 +23,18 @@ from news_archive.models import Article, ArticleEntity, CollectionRun
 _pool: ConnectionPool | None = None
 
 
+def _configure_connection(conn: psycopg.Connection) -> None:
+    """Disable server-side prepared statements.
+
+    Supabase's Transaction pooler (Supavisor / pgbouncer in transaction mode)
+    rotates backend connections between transactions, so a prepared statement
+    registered on one backend is invisible — or a name collision — on the next.
+    Setting `prepare_threshold=None` tells psycopg to never auto-prepare, which
+    is the canonical fix when connecting through a transaction pooler.
+    """
+    conn.prepare_threshold = None
+
+
 def get_pool() -> ConnectionPool:
     """Lazy-initialized process-wide pool. Small by default (droplet has 1 vCPU)."""
     global _pool
@@ -32,6 +44,7 @@ def get_pool() -> ConnectionPool:
             min_size=1,
             max_size=4,
             kwargs={"row_factory": dict_row, "autocommit": False},
+            configure=_configure_connection,
             open=True,
         )
     return _pool
