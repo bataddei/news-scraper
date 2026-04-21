@@ -13,6 +13,7 @@ from news_archive.collectors.base import BaseCollector
 from news_archive.collectors.bls_releases import BLSReleasesCollector
 from news_archive.collectors.fed_fomc_statements import FOMCStatementsCollector
 from news_archive.collectors.fed_speeches import FedSpeechesCollector
+from news_archive.collectors.sec_edgar_mag7 import SECEdgarMag7Collector
 from news_archive.collectors.treasury_press import TreasuryPressCollector
 from news_archive.db import close_pool
 from news_archive.logging_config import configure_logging, get_logger
@@ -24,8 +25,7 @@ COLLECTORS: dict[str, type[BaseCollector]] = {
     "fed_speeches": FedSpeechesCollector,
     "bls_releases": BLSReleasesCollector,
     "treasury_press": TreasuryPressCollector,
-    # Week 2 additions will register more here:
-    # "sec_edgar_mag7": SECEdgarCollector,
+    "sec_edgar_mag7": SECEdgarMag7Collector,
 }
 
 

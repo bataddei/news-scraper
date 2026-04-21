@@ -24,7 +24,9 @@ PATH=/opt/news-scraper/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/b
 # Treasury press releases: hourly at :30. Scrapes home.treasury.gov/news/press-releases
 # (no dedicated RSS feed exists).
 30 * * * *  news cd /opt/news-scraper && .venv/bin/python -m news_archive.collectors.run treasury_press
-# */15 * * * * news cd /opt/news-scraper && .venv/bin/python -m news_archive.collectors.run sec_edgar_mag7
+# SEC EDGAR Mag 7 filings: every 15 minutes. EDGAR publishes rapidly and new
+# filings (esp. 8-K) are market-moving — we want the smallest feasible lag.
+*/15 * * * * news cd /opt/news-scraper && .venv/bin/python -m news_archive.collectors.run sec_edgar_mag7
 
 # ---- Tier 2 collectors (Week 3) ----
 # 30 2 * * *  news cd /opt/news-scraper && .venv/bin/python -m news_archive.collectors.run gdelt_gkg

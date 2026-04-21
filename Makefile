@@ -44,6 +44,9 @@ run-bls:
 run-treasury:
 	python -m news_archive.collectors.run treasury_press
 
+run-sec:
+	python -m news_archive.collectors.run sec_edgar_mag7
+
 clean:
 	rm -rf build dist *.egg-info .pytest_cache .ruff_cache .mypy_cache
 	find . -type d -name __pycache__ -exec rm -rf {} +
