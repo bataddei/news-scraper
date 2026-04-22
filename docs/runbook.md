@@ -2,8 +2,6 @@
 
 Procedures for running and maintaining the news archive. Written in plain language; each procedure is a checklist you can follow top-to-bottom.
 
-Sections marked *(Week N)* are placeholders — filled in as we reach that week.
-
 ---
 
 ## Contents
@@ -12,13 +10,15 @@ Sections marked *(Week N)* are placeholders — filled in as we reach that week.
 2. [First-time Supabase setup](#first-time-supabase-setup)
 3. [Running the end-to-end test](#running-the-end-to-end-test)
 4. [Adding a new source](#adding-a-new-source)
-5. [Dealing with a failing source](#dealing-with-a-failing-source) *(Week 2+)*
-6. [Daily integrity report](#daily-integrity-report) *(Week 4)*
-7. [Gap detection](#gap-detection) *(Week 4)*
-8. [Backup and restore drill](#backup-and-restore-drill) *(Week 4)*
-9. [Rotating credentials](#rotating-credentials)
-10. [Provisioning the DigitalOcean droplet](#provisioning-the-digitalocean-droplet) *(deferred)*
-11. [Resizing the droplet](#resizing-the-droplet) *(Week 4)*
+5. [Dealing with a failing source](#dealing-with-a-failing-source)
+6. [Daily integrity report](#daily-integrity-report)
+7. [Gap detection](#gap-detection)
+8. [Healthcheck heartbeat](#healthcheck-heartbeat)
+9. [Deploying a code change to the droplet](#deploying-a-code-change-to-the-droplet)
+10. [Backup and restore drill](#backup-and-restore-drill)
+11. [Rotating credentials](#rotating-credentials)
+12. [Provisioning the DigitalOcean droplet](#provisioning-the-digitalocean-droplet)
+13. [Resizing the droplet](#resizing-the-droplet)
 
 ---
 
@@ -26,10 +26,10 @@ Sections marked *(Week N)* are placeholders — filled in as we reach that week.
 
 Working directory: `/Users/benitoalvareztaddei/code/news-scraper`.
 
-1. Make sure Python 3.12 is installed: `python3.12 --version`. If missing: `brew install python@3.12`.
+1. Make sure Python 3.13 is installed: `python3.13 --version`. If missing: `brew install python@3.13`.
 2. Create a virtualenv and install the project with dev extras:
    ```bash
-   python3.12 -m venv .venv
+   python3.13 -m venv .venv
    source .venv/bin/activate
    make install-dev
    ```
@@ -84,30 +84,208 @@ If it fails: the log lines above the failure will name the check that failed. Mo
 
 ## Dealing with a failing source
 
-*(Populated in Week 2 when the first collectors exist.)*
+Symptom: the daily report shows failed runs for a source, or gap detection flags it as overdue / never-run.
 
-General shape will be:
-1. Check `collection_runs` for that `source_id` ordered by `started_at desc` — what's the latest `status` and `error_message`?
-2. Check the systemd journal: `journalctl -u news-collector@<slug>.service -n 200`.
-3. If the source changed its feed format, update the parser; don't hotfix prod — commit a fix and redeploy.
+### 1. Triage — what does the DB say?
+
+In Supabase SQL editor:
+
+```sql
+select started_at, finished_at, status, articles_seen, articles_inserted, error_message
+from news_archive.collection_runs
+where source_id = (select id from news_archive.sources where slug = '<slug>')
+order by started_at desc
+limit 20;
+```
+
+Look at the pattern:
+- **All failed, same error** → upstream change (feed format, URL moved, auth required) or network/DNS. Likely needs a code fix.
+- **Flapping between success and failed** → transient upstream flakiness. Dedup absorbs it; leave it alone unless it keeps happening.
+- **No rows at all** → the collector never ran. Check the cron/systemd layer (next step).
+
+### 2. Check the scheduler on the droplet
+
+```bash
+ssh root@<droplet-ip>
+# Cron logs (what cron actually fired and when)
+journalctl -u cron.service --since "6 hours ago" | grep news_archive
+# The collector's own logs (structured JSON from Python)
+journalctl -t news-collector-<slug> --since "6 hours ago"
+# Or for a cron-run collector, check the root journal for Python errors:
+journalctl _COMM=python3.13 --since "2 hours ago" | grep -i <slug>
+```
+
+### 3. Run the collector by hand to reproduce
+
+On the droplet, as the `news` user:
+
+```bash
+sudo -u news bash
+cd /opt/news-scraper
+.venv/bin/python -m news_archive.collectors.run <slug>
+```
+
+Read the last structured log line. Fields to look at: `status`, `articles_seen`, `error`. If it's an HTTP error, the response status and URL will be in the log.
+
+### 4. Fix and redeploy
+
+Never hotfix files on the droplet. Always: fix locally → commit → pull on droplet. See [Deploying a code change](#deploying-a-code-change-to-the-droplet).
+
+### 5. Confirm recovery
+
+After deploying, watch one successful run:
+
+```bash
+sudo -u news /opt/news-scraper/.venv/bin/python -m news_archive.collectors.run <slug>
+# Then verify a fresh collection_runs row landed with status='success'.
+make gap-check  # should no longer list this slug
+```
 
 ---
 
 ## Daily integrity report
 
-*(Week 4.)*
+A Telegram message posted at **08:00 UTC every day** summarising the last 24 hours: articles inserted per source, failed runs, total archive size, droplet disk, and any active gaps.
+
+### What the report includes
+
+- **Per-source table**: `ins` (inserted), `dup` (duplicate), `seen` (total), `fail` (failed runs).
+- **Archive stats**: total articles, Supabase DB size, droplet disk % used.
+- **Gaps section**: anything `gap_check` currently flags (see below). ✅ if clean.
+
+Only active collectors appear in the table. Dead seeded sources (Reuters, AP, Business Wire) are filtered out via `COLLECTORS` membership in `collectors/run.py`.
+
+### Sending a report by hand
+
+Useful for testing config changes or sending a one-off snapshot:
+
+```bash
+# Locally:
+make daily-report
+
+# On the droplet:
+sudo -u news bash
+cd /opt/news-scraper && .venv/bin/python -m news_archive.scripts.daily_report
+```
+
+Requires `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env`.
+
+### The report didn't arrive
+
+1. Check the cron job actually fired at 08:00 UTC:
+   ```bash
+   journalctl -u cron.service --since today | grep daily_report
+   ```
+2. If it fired but the message never arrived:
+   ```bash
+   journalctl _COMM=python3.13 --since today | grep daily_report
+   ```
+   Look for `daily_report.send_failed` (Telegram API error) or `daily_report.missing_telegram_config` (env vars not loaded). A Telegram 401 usually means the bot token was rotated; a 400 with `chat not found` means the bot was removed from the chat.
+
+### Changing the schedule
+
+Edit the `daily_report` line in `deploy/cron/news-pipeline.cron` and reinstall:
+
+```bash
+sudo cp deploy/cron/news-pipeline.cron /etc/cron.d/news-pipeline
+```
 
 ---
 
 ## Gap detection
 
-*(Week 4.)*
+"Which sources haven't successfully run in too long?" Per-source tolerance is ~2× the cron cadence (see `SOURCE_MAX_GAP_SECONDS` in `src/news_archive/monitoring/gaps.py`).
+
+### Run a manual check
+
+```bash
+# Locally:
+make gap-check
+
+# On the droplet:
+sudo -u news /opt/news-scraper/.venv/bin/python -m news_archive.scripts.gap_check
+```
+
+Exits 0 if clean, 1 if any gap is detected (output goes to stdout as structured logs).
+
+Two gap kinds:
+- **`never_run`** — source exists in `sources` but has zero rows in `collection_runs` with `status in ('success', 'partial')`. Usually means the collector was seeded but never wired up / never fired.
+- **`overdue`** — last success is older than the tolerance. Either the collector is broken, or cron isn't firing it.
+
+### Responding to a gap
+
+1. Identify which slug is flagged. Follow [Dealing with a failing source](#dealing-with-a-failing-source) for that slug.
+2. If the gap is expected (e.g. ForexFactory runs only twice a day and you checked between fires), no action — tolerance is already 14h.
+3. After fixing, re-run `make gap-check` — it should exit 0.
+
+### Tuning a tolerance
+
+If a tolerance is too tight and pages on normal cadence, update `SOURCE_MAX_GAP_SECONDS` in `src/news_archive/monitoring/gaps.py`. Keep the inline cron-cadence comment in sync so the mapping stays readable.
+
+---
+
+## Healthcheck heartbeat
+
+An hourly curl to healthchecks.io confirms the droplet is alive and cron is firing. If the droplet dies or cron stops, healthchecks.io notices the missed ping within ~2 hours and emails the operator.
+
+### Setup
+
+1. Create a check at healthchecks.io with period = 1 hour, grace = 1 hour.
+2. Copy the ping URL into `/opt/news-scraper/.env` as `HEALTHCHECKS_URL=https://hc-ping.com/...`.
+3. The cron line `0 * * * * news /opt/news-scraper/deploy/healthcheck.sh` is already installed; no further action.
+
+### The heartbeat alarm fired
+
+It means cron didn't run the healthcheck curl in the last hour. Possible causes, in order of likelihood:
+
+1. **Droplet down / unreachable** — check the DigitalOcean console.
+2. **Cron stopped** — `systemctl status cron` on the droplet.
+3. **Network outage** — droplet is up but can't reach hc-ping.com. Log in and try `curl $HEALTHCHECKS_URL` manually.
+4. **`.env` missing or unreadable by `news` user** — `healthcheck.sh` sources `.env`; if it can't, it exits without pinging. Check with `sudo -u news cat /opt/news-scraper/.env > /dev/null`.
+
+### Temporarily pausing the check
+
+While doing maintenance that might take the droplet down for more than an hour, pause the check in the healthchecks.io UI (don't delete — paused preserves history and the URL).
+
+---
+
+## Deploying a code change to the droplet
+
+The droplet runs from a clone of the repo at `/opt/news-scraper`. Deployments are `git pull` + restart.
+
+```bash
+ssh root@<droplet-ip>
+cd /opt/news-scraper
+sudo -u news git pull
+# If pyproject.toml / dependencies changed:
+sudo -u news .venv/bin/pip install -e .
+# If a migration was added:
+sudo -u news .venv/bin/python -m news_archive.scripts.run_migrations
+# If deploy/cron/news-pipeline.cron changed:
+sudo cp deploy/cron/news-pipeline.cron /etc/cron.d/news-pipeline
+# If a systemd unit changed:
+sudo cp deploy/systemd/news-collector@.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl restart 'news-collector@*.service'
+```
+
+Run `make gap-check` on the droplet after deploying to confirm nothing regressed.
+
+### Rollback
+
+If a deploy breaks a collector, `sudo -u news git log --oneline -10`, pick the last good SHA, `sudo -u news git checkout <sha>`, repeat the migration/cron/systemd steps above with the old files. Then fix forward on a fresh commit rather than leaving the droplet in detached HEAD.
 
 ---
 
 ## Backup and restore drill
 
-*(Week 4.)*
+*Backup strategy is not yet chosen — operator decision pending between Supabase built-in PITR (free on paid tier, 7-day retention) vs. weekly `pg_dump` to DigitalOcean Spaces (~$5/mo, indefinite retention).*
+
+Once chosen, this section will cover:
+
+- How backups are produced and where they live.
+- How to verify a backup is good (list latest, check size is nonzero and within ±50% of previous).
+- A quarterly **restore drill**: take the latest backup, restore it into a throwaway Supabase project, run `make e2e` against it, then delete the throwaway project. The point is to confirm backups are actually restorable — untested backups don't count.
 
 ---
 
@@ -134,20 +312,29 @@ General shape will be:
 
 ## Provisioning the DigitalOcean droplet
 
-*(Deferred until the local build is proven.)*
+Full step-by-step is in [`docs/start-server.md`](start-server.md). That document is the canonical install procedure — this runbook only summarises.
 
-High-level plan when we get there:
-1. Create smallest reasonable droplet (~$6/mo, Ubuntu 24.04 LTS) in the region closest to the Supabase project.
-2. Add operator's SSH key during creation.
-3. SSH in, create a `news` user, install Python 3.12, clone the repo to `/opt/news-scraper`.
-4. Copy `.env` over (out of band — never via git).
-5. Install systemd template + cron file from `deploy/`.
-6. Enable each collector one at a time; watch logs for 24h before enabling the next.
+- **Size**: smallest reasonable droplet (~$6/mo).
+- **OS**: Debian 13 (Trixie) — ships Python 3.13 out of the box.
+- **Region**: closest to the Supabase project.
+- **User**: pipeline runs as unprivileged `news` user (matches systemd unit's `User=news`).
+- **Repo**: cloned to `/opt/news-scraper`; `.env` copied out of band (never via git).
+- **Scheduler**: cron file at `/etc/cron.d/news-pipeline`, installed from `deploy/cron/news-pipeline.cron`.
+- **Logs**: journald (no rsyslog on Debian 13). Plain-text logs in `/var/log/news-pipeline/*.log` rotated by logrotate.
 
 ---
 
 ## Resizing the droplet
 
-*(Week 4 or later.)*
+Supabase is the expensive bit, not the droplet. Resize only if the droplet actually runs out of memory or disk.
 
-Supabase is the expensive bit, not the droplet. Resize only if the droplet actually runs out of memory (check `journalctl -k | grep -i oom`).
+### When to resize
+
+- **Memory**: `journalctl -k | grep -i oom` shows the kernel killing Python processes.
+- **Disk**: daily report shows droplet disk >85% used for several consecutive days, and the offender is something you can't trim (journald is already capped, `/opt/news-scraper/.venv` is ~300MB, cloned repo is small).
+
+### Procedure
+
+1. In the DigitalOcean console: Droplet → Resize. Choose "CPU and RAM only" for a reversible resize (disk-included resizes are one-way).
+2. Power off the droplet when prompted. The resize takes a few minutes.
+3. Power back on. SSH in, run `make gap-check` — all collectors should resume on their own via cron. If any collector was running at shutdown, its `collection_runs` row may be stuck in `status='running'`; it'll be superseded by the next cron tick.
