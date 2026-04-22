@@ -1,0 +1,31 @@
+# Runtime dependencies for the news-archive pipeline.
+# Pinned from the working laptop venv so the droplet runs exactly what was tested.
+# Regenerate with: .venv/bin/pip freeze --exclude-editable | grep -v -E '^(mypy|ruff|pytest|iniconfig|pluggy|Pygments|pathspec|mypy_extensions|librt|packaging)'
+#
+# Install on the droplet:
+#   pip install -r requirements.txt
+#
+# Dev-only tools (pytest, ruff, mypy) are in pyproject.toml [project.optional-dependencies].
+
+annotated-types==0.7.0
+anyio==4.13.0
+beautifulsoup4==4.14.3
+certifi==2026.2.25
+feedparser==6.0.12
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.12
+psycopg==3.3.3
+psycopg-binary==3.3.3
+psycopg-pool==3.3.0
+pydantic==2.13.3
+pydantic-settings==2.14.0
+pydantic_core==2.46.3
+python-dotenv==1.2.2
+sgmllib3k==1.0.0
+soupsieve==2.8.3
+structlog==25.5.0
+tenacity==9.1.4
+typing-inspection==0.4.2
+typing_extensions==4.15.0
