@@ -43,4 +43,5 @@ PATH=/opt/news-scraper/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/b
 # paid feed or alternate access path before enabling.
 
 # ---- Week 4: daily integrity report at 08:00 UTC ----
-# 0 8 * * *   news cd /opt/news-scraper && .venv/bin/python -m news_archive.scripts.daily_report
+# Posts to Telegram. Requires TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID in .env.
+0 8 * * *   news cd /opt/news-scraper && .venv/bin/python -m news_archive.scripts.daily_report

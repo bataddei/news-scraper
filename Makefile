@@ -62,6 +62,9 @@ run-gdelt:
 gap-check:
 	python -m news_archive.scripts.gap_check
 
+daily-report:
+	python -m news_archive.scripts.daily_report
+
 clean:
 	rm -rf build dist *.egg-info .pytest_cache .ruff_cache .mypy_cache
 	find . -type d -name __pycache__ -exec rm -rf {} +
