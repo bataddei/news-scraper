@@ -59,6 +59,9 @@ run-ffcal:
 run-gdelt:
 	python -m news_archive.collectors.run gdelt_gkg
 
+gap-check:
+	python -m news_archive.scripts.gap_check
+
 clean:
 	rm -rf build dist *.egg-info .pytest_cache .ruff_cache .mypy_cache
 	find . -type d -name __pycache__ -exec rm -rf {} +
