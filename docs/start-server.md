@@ -44,20 +44,26 @@ Expected: `Status: active`, one rule allowing 22/tcp.
 
 ---
 
-## Step 3: Create the `news` service user
+## Step 3: Create the `news` service user and home dir
 
 The pipeline runs as an unprivileged user, not root. This matches the
 systemd unit's `User=news` / `Group=news`.
 
 ```bash
 adduser --system --group --home /opt/news-scraper --shell /bin/bash news
+# adduser --system sometimes skips creating the home dir. Create it
+# explicitly so later steps don't trip.
+mkdir -p /opt/news-scraper
+chown news:news /opt/news-scraper
+chmod 750 /opt/news-scraper
 ```
 
 Verify:
 
 ```bash
 id news
-# Expected: uid=... gid=... groups=...
+ls -ld /opt/news-scraper
+# Expected: uid/gid for news, and drwxr-x--- news news on the dir
 ```
 
 ---
@@ -104,28 +110,34 @@ chmod 750 /var/log/news-pipeline
 
 ## Step 6: Pull the repo onto the droplet
 
-Two options. **Option A is recommended** (uses SSH, matches dev workflow).
+`/opt/news-scraper` was created in Step 3 as the `news` user's home. It may
+contain skel dotfiles (`.bashrc`, `.profile`). Git refuses to clone into a
+non-empty directory, so clone into a scratch subdir first and move files into
+place. Two options below — **Option A is recommended**.
 
 ### Option A: clone from GitHub
 
-On your laptop, make sure the code is pushed:
+On your **laptop**, make sure the latest code is pushed:
 
 ```bash
 # On your laptop
 git push origin main
 ```
 
-On the droplet, as `news`:
+On the **droplet**, as root:
 
 ```bash
-sudo -u news -H bash
-cd /opt/news-scraper
-git clone https://github.com/<your-user>/news-scraper.git .
-exit
+# Clone into a scratch dir, then move the working tree into /opt/news-scraper
+sudo -u news git clone https://github.com/<your-user>/news-scraper.git /tmp/news-scraper-clone
+sudo -u news bash -c 'shopt -s dotglob && mv /tmp/news-scraper-clone/* /opt/news-scraper/'
+rm -rf /tmp/news-scraper-clone
+ls -la /opt/news-scraper
 ```
 
 Replace `<your-user>` with your GitHub username. If the repo is private,
-use an SSH deploy key or a personal access token URL instead.
+use an SSH deploy key or a personal-access-token URL
+(`https://<token>@github.com/...`). Expected: `ls` shows `src/`, `tests/`,
+`pyproject.toml`, `requirements.txt`, `.git/`, etc.
 
 ### Option B: rsync from your laptop
 
@@ -149,7 +161,7 @@ As `news`:
 ```bash
 sudo -u news -H bash
 cd /opt/news-scraper
-python3.12 -m venv .venv
+python3.13 -m venv .venv
 .venv/bin/pip install --upgrade pip
 .venv/bin/pip install -r requirements.txt
 .venv/bin/pip install -e .
@@ -159,13 +171,9 @@ exit
 The editable install (`pip install -e .`) is what makes
 `python -m news_archive.collectors.run ...` work.
 
-Smoke test — no DB hit yet, just verify the package imports:
-
-```bash
-sudo -u news /opt/news-scraper/.venv/bin/python -c "from news_archive.collectors.run import COLLECTORS; print(sorted(COLLECTORS))"
-```
-
-Expected: the list of 9 collector slugs.
+(No smoke test here yet — the package imports load `config.py`, which
+requires `SUPABASE_DB_URL` to be set. That lives in `.env`, which we
+copy over in Step 8. Full import+DB verification happens in Step 9.)
 
 ---
 
@@ -226,11 +234,12 @@ Verify cron picked up the file:
 
 ```bash
 systemctl status cron --no-pager
-grep news-pipeline /var/log/syslog | tail -5
+journalctl -u cron --since "5 minutes ago" | tail -20
 ```
 
-Expected: `Active: active (running)` and recent log lines mentioning
-`(news-pipeline)`.
+Expected: `Active: active (running)` and no parse-error lines. Debian 13
+doesn't ship `rsyslog` by default, so `/var/log/syslog` won't exist —
+use `journalctl -u cron -f` to watch fires live.
 
 ---
 
@@ -251,7 +260,10 @@ systemctl daemon-reload
 
 ## Step 12: Install logrotate
 
+Debian 13 minimal images don't ship `logrotate` — install it first:
+
 ```bash
+apt install -y logrotate
 cp /opt/news-scraper/deploy/logrotate.conf /etc/logrotate.d/news-pipeline
 logrotate -d /etc/logrotate.d/news-pipeline
 # "-d" runs in debug/dry mode — check for errors.
@@ -265,8 +277,8 @@ Wait ~15 minutes for the SEC EDGAR collector (`*/15 * * * *`) to fire,
 then check:
 
 ```bash
-# Cron saw the job fire
-grep CRON /var/log/syslog | grep news-pipeline | tail -10
+# Cron saw the job fire (use journalctl; Debian 13 has no /var/log/syslog)
+journalctl -u cron --since "20 minutes ago" | grep CMD | tail -10
 
 # Collector logged a successful run
 sudo -u news bash -c 'cd /opt/news-scraper && .venv/bin/python -c "
@@ -287,7 +299,7 @@ visible when you inspect rows directly.
 | Action | Command |
 |---|---|
 | Tail all collector logs (journald) | `journalctl -u 'news-collector@*' -f` |
-| Tail cron fires | `grep news-pipeline /var/log/syslog` |
+| Tail cron fires | `journalctl -u cron -f` |
 | Run one collector by hand | `sudo -u news bash -c 'cd /opt/news-scraper && .venv/bin/python -m news_archive.collectors.run <slug>'` |
 | Pull latest code | `sudo -u news bash -c 'cd /opt/news-scraper && git pull'` |
 | Reinstall deps after pull | `sudo -u news bash -c 'cd /opt/news-scraper && .venv/bin/pip install -r requirements.txt && .venv/bin/pip install -e .'` |
