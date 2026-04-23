@@ -32,6 +32,46 @@ def get_source_id_by_slug(slug: str) -> int:
         return int(row["id"])
 
 
+def get_feed_url_by_slug(slug: str) -> str:
+    """Read the `feed_url` column for a given source slug.
+
+    Raises LookupError if the slug is missing; ValueError if feed_url is NULL.
+    A NULL feed_url for an RSS/Atom collector indicates an un-confirmed seed row
+    that needs a data migration before the collector can run.
+    """
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "select feed_url from literature.sources where slug = %s",
+            (slug,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise LookupError(f"no literature source with slug={slug!r}")
+        if row["feed_url"] is None:
+            raise ValueError(f"literature.sources.feed_url is NULL for slug={slug!r}")
+        return str(row["feed_url"])
+
+
+def list_active_slugs_by_prefix(prefix: str) -> list[str]:
+    """Return slugs of active sources whose slug starts with `prefix` (e.g. 'blog_').
+
+    Used by the blog driver so adding a new blog is an INSERT migration, not a
+    code change. Ordered by slug for deterministic iteration order.
+    """
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            select slug
+              from literature.sources
+             where slug like %s
+               and active = true
+             order by slug
+            """,
+            (f"{prefix}%",),
+        )
+        return [str(r["slug"]) for r in cur.fetchall()]
+
+
 # ---------------------------------------------------------------------------
 # collection_runs
 # ---------------------------------------------------------------------------

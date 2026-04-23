@@ -50,7 +50,10 @@ PATH=/opt/news-scraper/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/b
 # arXiv q-fin: once daily at 06:00 UTC. arXiv publishes once per day per
 # category set; hourly polling would be pointless and rude.
 0 6 * * *   news cd /opt/news-scraper && .venv/bin/python -m news_archive.literature.collectors.run arxiv_qfin
-# blog_* and journal_* — added as each collector ships (one at a time, per brief).
+# Curated quant blogs: every 6 hours. Driver discovers active blog_* rows in
+# literature.sources, so adding a new blog is an INSERT migration, not a cron edit.
+0 */6 * * * news cd /opt/news-scraper && .venv/bin/python -m news_archive.literature.scripts.run_blogs
+# journal_* — added as each collector ships (one at a time, per brief).
 # SSRN — added last (messiest source).
 # Triage pass and daily literature digest — wired up after all four collectors
 # have run cleanly for 24h.

@@ -68,6 +68,9 @@ backfill-arxiv:
 backfill-arxiv-dry:
 	python -m news_archive.literature.scripts.backfill_arxiv --dry-run
 
+run-blogs:
+	python -m news_archive.literature.scripts.run_blogs
+
 gap-check:
 	python -m news_archive.scripts.gap_check
 
