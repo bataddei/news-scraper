@@ -140,6 +140,27 @@ class TestBuildSearchQuery:
         for cat in ("q-fin.TR", "q-fin.PM", "q-fin.ST", "q-fin.CP", "q-fin.RM"):
             assert f"cat:{cat}" in q
 
+    def test_submitted_since_adds_date_clause_with_explicit_upper(self) -> None:
+        since = datetime(2025, 1, 1, 0, 0, 0, tzinfo=UTC)
+        until = datetime(2026, 4, 23, 23, 59, 59, tzinfo=UTC)
+        q = build_search_query(["q-fin.TR"], submitted_since=since, submitted_until=until)
+        # 14-char YYYYMMDDHHMMSS format; parenthesised categories so AND binds tighter than OR.
+        assert q == "(cat:q-fin.TR) AND submittedDate:[20250101000000 TO 20260423235959]"
+
+    def test_submitted_since_default_upper_is_now(self) -> None:
+        since = datetime(2025, 1, 1, 0, 0, 0, tzinfo=UTC)
+        q = build_search_query(["q-fin.TR"], submitted_since=since)
+        # Upper bound defaults to now(UTC) — we just verify shape and that it's strictly after `since`.
+        assert q.startswith("(cat:q-fin.TR) AND submittedDate:[20250101000000 TO ")
+        assert q.endswith("]")
+        upper_str = q.rsplit(" TO ", 1)[1].rstrip("]")
+        assert len(upper_str) == 14 and upper_str.isdigit()
+        assert upper_str > "20250101000000"
+
+    def test_submitted_since_none_is_no_op(self) -> None:
+        q = build_search_query(["q-fin.TR"], submitted_since=None)
+        assert q == "cat:q-fin.TR"
+
 
 class TestParsedTimeToUtc:
     def test_converts_struct_time(self) -> None:

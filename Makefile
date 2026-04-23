@@ -62,6 +62,12 @@ run-gdelt:
 run-arxiv:
 	python -m news_archive.literature.collectors.run arxiv_qfin
 
+backfill-arxiv:
+	python -m news_archive.literature.scripts.backfill_arxiv
+
+backfill-arxiv-dry:
+	python -m news_archive.literature.scripts.backfill_arxiv --dry-run
+
 gap-check:
 	python -m news_archive.scripts.gap_check
 

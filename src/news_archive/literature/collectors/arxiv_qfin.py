@@ -157,14 +157,92 @@ def _entry_to_dict(entry: Any) -> dict[str, Any]:
     return out
 
 
-def build_search_query(categories: Iterable[str]) -> str:
-    """`cat:q-fin.TR OR cat:q-fin.PM OR ...` — feeds the `search_query` param."""
-    return " OR ".join(f"cat:{c}" for c in categories)
+def build_search_query(
+    categories: Iterable[str],
+    *,
+    submitted_since: datetime | None = None,
+    submitted_until: datetime | None = None,
+) -> str:
+    """`cat:q-fin.TR OR cat:q-fin.PM OR ...` — feeds the `search_query` param.
+
+    If `submitted_since` is given, the query is scoped to submittedDate via
+    arXiv's 14-character range syntax: `[YYYYMMDDHHMMSS TO YYYYMMDDHHMMSS]`.
+    An explicit upper bound is required — arXiv's API rejects `[... TO *]`
+    with a 500. `submitted_until` defaults to `datetime.now(UTC)` when
+    `submitted_since` is set.
+    """
+    cats = " OR ".join(f"cat:{c}" for c in categories)
+    if submitted_since is None:
+        return cats
+    upper = submitted_until or datetime.now(UTC)
+    lo = submitted_since.strftime("%Y%m%d%H%M%S")
+    hi = upper.strftime("%Y%m%d%H%M%S")
+    return f"({cats}) AND submittedDate:[{lo} TO {hi}]"
 
 
 def parse_feed(raw: bytes) -> Any:
     """Thin wrapper so tests can target parsing directly."""
     return feedparser.parse(raw)
+
+
+def entry_to_paper(
+    entry: Any,
+    *,
+    source_id: int,
+    fetched_at: datetime,
+    logger: Any | None = None,
+) -> Paper | None:
+    """Turn one feedparser entry into a Paper, or return None if it's unusable.
+
+    Shared by the daily collector and the one-shot backfill script so the
+    validation + field-mapping logic lives in one place. `logger` is the
+    bound `structlog` logger used to emit `item.skipped_*` warnings; if
+    None, validation failures return silently (handy for tests).
+    """
+    published = _parsed_time_to_utc(entry.get("published_parsed"))
+    if published is None:
+        if logger is not None:
+            logger.warning(
+                "item.skipped_no_pubdate",
+                title=(entry.get("title") or "")[:120],
+                link=entry.get("link"),
+            )
+        return None
+
+    title = (entry.get("title") or "").strip()
+    if not title:
+        if logger is not None:
+            logger.warning("item.skipped_no_title", link=entry.get("link"))
+        return None
+
+    arxiv_id = extract_arxiv_id(entry)
+    if arxiv_id is None:
+        if logger is not None:
+            logger.warning("item.skipped_no_id", title=title[:120])
+        return None
+
+    url = entry.get("link") or None
+    if not url:
+        if logger is not None:
+            logger.warning("item.skipped_no_url", title=title[:120])
+        return None
+
+    abstract = (entry.get("summary") or "").strip() or None
+    return Paper(
+        source_id=source_id,
+        external_id=arxiv_id,
+        url=url,
+        pdf_url=extract_pdf_url(entry),
+        title=title,
+        authors=extract_authors(entry),
+        abstract=abstract,
+        categories=extract_categories(entry),
+        keywords=[],  # arXiv doesn't expose a keyword field
+        source_published_at=published,
+        source_fetched_at=fetched_at,
+        raw_payload=_entry_to_dict(entry),
+        content_hash=content_hash(title, abstract),
+    )
 
 
 class ArxivQfinCollector(LitBaseCollector):
@@ -197,50 +275,11 @@ class ArxivQfinCollector(LitBaseCollector):
         self.logger.info("feed.loaded", entries=len(feed.entries), feed_url=self.api_url)
 
         for entry in feed.entries:
-            yield from self._entry_to_paper(entry, fetched_at=fetched_at)
-
-    def _entry_to_paper(self, entry: Any, *, fetched_at: datetime) -> Iterable[Paper]:
-        published = _parsed_time_to_utc(entry.get("published_parsed"))
-        if published is None:
-            self.logger.warning(
-                "item.skipped_no_pubdate",
-                title=(entry.get("title") or "")[:120],
-                link=entry.get("link"),
+            paper = entry_to_paper(
+                entry,
+                source_id=self.source_id,
+                fetched_at=fetched_at,
+                logger=self.logger,
             )
-            return
-
-        title = (entry.get("title") or "").strip()
-        if not title:
-            self.logger.warning("item.skipped_no_title", link=entry.get("link"))
-            return
-
-        arxiv_id = extract_arxiv_id(entry)
-        if arxiv_id is None:
-            self.logger.warning("item.skipped_no_id", title=title[:120])
-            return
-
-        url = entry.get("link") or None
-        if not url:
-            self.logger.warning("item.skipped_no_url", title=title[:120])
-            return
-
-        abstract = (entry.get("summary") or "").strip() or None
-        pdf_url = extract_pdf_url(entry)
-        authors = extract_authors(entry)
-        categories = extract_categories(entry)
-
-        yield Paper(
-            source_id=self.source_id,
-            external_id=arxiv_id,
-            url=url,
-            pdf_url=pdf_url,
-            title=title,
-            authors=authors,
-            abstract=abstract,
-            categories=categories,
-            keywords=[],  # arXiv doesn't expose a keyword field
-            source_published_at=published,
-            source_fetched_at=fetched_at,
-            raw_payload=_entry_to_dict(entry),
-            content_hash=content_hash(title, abstract),
-        )
+            if paper is not None:
+                yield paper
