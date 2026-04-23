@@ -18,7 +18,9 @@ from news_archive.literature.collectors.rss_feed import (
     _parsed_time_to_utc,
     entry_to_paper,
     extract_authors,
+    extract_authors_from_description,
     extract_categories,
+    extract_pubdate_from_description,
 )
 
 FIXTURE_RSS = """<?xml version="1.0" encoding="UTF-8"?>
@@ -68,6 +70,46 @@ class TestExtractAuthors:
 
     def test_returns_empty_when_missing(self) -> None:
         assert extract_authors({}) == []
+
+
+class TestExtractPubdateFromDescription:
+    """ScienceDirect puts the date in description HTML rather than <pubDate>."""
+
+    def test_day_month_year(self) -> None:
+        desc = "<p>Publication date: Available online 15 April 2026</p><p>Source: JFM</p>"
+        assert extract_pubdate_from_description(desc) == datetime(2026, 4, 15, tzinfo=UTC)
+
+    def test_month_year_lands_on_day_one(self) -> None:
+        desc = "<p>Publication date: July 2026</p>"
+        assert extract_pubdate_from_description(desc) == datetime(2026, 7, 1, tzinfo=UTC)
+
+    def test_prefers_specific_over_generic(self) -> None:
+        # When both a specific DD Month YYYY and a Month YYYY appear, pick the more specific one.
+        desc = "<p>Publication date: Available online 15 April 2026</p><p>Publication date: July 2026</p>"
+        assert extract_pubdate_from_description(desc) == datetime(2026, 4, 15, tzinfo=UTC)
+
+    def test_none_when_absent(self) -> None:
+        assert extract_pubdate_from_description("<p>Source: JFM</p>") is None
+        assert extract_pubdate_from_description(None) is None
+        assert extract_pubdate_from_description("") is None
+
+    def test_invalid_month_returns_none(self) -> None:
+        assert extract_pubdate_from_description("Publication date: Smarch 2026") is None
+
+
+class TestExtractAuthorsFromDescription:
+    def test_parses_comma_separated_list(self) -> None:
+        desc = "<p>Author(s): David Easley, Maureen O'Hara, Zhibai Zhang</p>"
+        assert extract_authors_from_description(desc) == [
+            "David Easley", "Maureen O'Hara", "Zhibai Zhang",
+        ]
+
+    def test_single_author(self) -> None:
+        assert extract_authors_from_description("Author(s): Jane Doe") == ["Jane Doe"]
+
+    def test_empty_when_absent(self) -> None:
+        assert extract_authors_from_description("No authors here") == []
+        assert extract_authors_from_description(None) == []
 
 
 class TestExtractCategories:

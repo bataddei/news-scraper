@@ -53,7 +53,10 @@ PATH=/opt/news-scraper/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/b
 # Curated quant blogs: every 6 hours. Driver discovers active blog_* rows in
 # literature.sources, so adding a new blog is an INSERT migration, not a cron edit.
 0 */6 * * * news cd /opt/news-scraper && .venv/bin/python -m news_archive.literature.scripts.run_blogs
-# journal_* — added as each collector ships (one at a time, per brief).
+# Academic journals: once daily at 07:00 UTC. Same driver pattern, discovers
+# active journal_* rows. Currently JFE + JFM (ScienceDirect); RFS + JPM are
+# seeded inactive — blocked by Cloudflare/WAF on the publisher sites.
+0 7 * * *   news cd /opt/news-scraper && .venv/bin/python -m news_archive.literature.scripts.run_journals
 # SSRN — added last (messiest source).
 # Triage pass and daily literature digest — wired up after all four collectors
 # have run cleanly for 24h.

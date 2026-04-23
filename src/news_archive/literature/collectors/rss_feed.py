@@ -24,6 +24,7 @@ Cross-source duplicates:
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from time import struct_time
@@ -50,6 +51,72 @@ def _parsed_time_to_utc(st: struct_time | None) -> datetime | None:
         )
     except (TypeError, ValueError):
         return None
+
+
+# ScienceDirect's RSS items omit <pubDate> entirely and embed the date in the
+# description as "Publication date: Available online 15 April 2026" or
+# "Publication date: July 2026" (issue-assigned). We parse both shapes as a
+# last-resort fallback. Month-only dates land on day 1 — the brief's backtest
+# contract uses GREATEST(source_published_at, source_fetched_at), so an early
+# parsed date can never create look-ahead bias.
+_MONTH_NAMES: dict[str, int] = {
+    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+    "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
+}
+_PUBDATE_DAY_MONTH_YEAR_RE = re.compile(
+    r"Publication date:[^<\n]*?(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})"
+)
+_PUBDATE_MONTH_YEAR_RE = re.compile(
+    r"Publication date:[^<\n]*?([A-Za-z]+)\s+(\d{4})"
+)
+
+_AUTHORS_DESCRIPTION_RE = re.compile(
+    r"Author\(s\):\s*([^<\n]+)",
+    re.IGNORECASE,
+)
+
+
+def extract_authors_from_description(description: str | None) -> list[str]:
+    """Parse a ScienceDirect-style `Author(s): A, B, C` clause. Returns []
+    when not present. Names are whitespace-trimmed; trailing commas/periods
+    from the description HTML are stripped."""
+    if not description:
+        return []
+    m = _AUTHORS_DESCRIPTION_RE.search(description)
+    if m is None:
+        return []
+    raw = m.group(1).strip()
+    # Strip trailing HTML artefacts and punctuation
+    raw = re.sub(r"</?[^>]+>", "", raw).strip().rstrip(".,;")
+    parts = [p.strip() for p in raw.split(",")]
+    return [p for p in parts if p]
+
+
+def extract_pubdate_from_description(description: str | None) -> datetime | None:
+    """Parse a ScienceDirect-style `Publication date:` clause out of an HTML
+    description. Returns a UTC-midnight datetime, or None if no date matches.
+    Day-month-year is preferred; falls back to month-year (first of month).
+    """
+    if not description:
+        return None
+    m = _PUBDATE_DAY_MONTH_YEAR_RE.search(description)
+    if m:
+        day_s, mon_s, year_s = m.group(1), m.group(2).lower(), m.group(3)
+        mon = _MONTH_NAMES.get(mon_s)
+        if mon is not None:
+            try:
+                return datetime(int(year_s), mon, int(day_s), tzinfo=UTC)
+            except ValueError:
+                pass
+    m = _PUBDATE_MONTH_YEAR_RE.search(description)
+    if m:
+        mon = _MONTH_NAMES.get(m.group(1).lower())
+        if mon is not None:
+            try:
+                return datetime(int(m.group(2)), mon, 1, tzinfo=UTC)
+            except ValueError:
+                pass
+    return None
 
 
 def extract_authors(entry: Any) -> list[str]:
@@ -121,6 +188,12 @@ def entry_to_paper(
     """Map a parsed RSS entry to a Paper row. Returns None for unusable entries."""
     published = _parsed_time_to_utc(entry.get("published_parsed"))
     if published is None:
+        # ScienceDirect (and any feed without <pubDate>) — try to recover the
+        # date from the HTML description before giving up.
+        published = extract_pubdate_from_description(
+            entry.get("summary") or entry.get("description")
+        )
+    if published is None:
         if logger is not None:
             logger.warning(
                 "item.skipped_no_pubdate",
@@ -144,13 +217,18 @@ def entry_to_paper(
     abstract = (entry.get("summary") or entry.get("description") or "").strip() or None
     external_id = entry.get("id") or entry.get("guid") or url
 
+    authors = extract_authors(entry)
+    if not authors:
+        # ScienceDirect-style: Author(s) embedded in description HTML.
+        authors = extract_authors_from_description(abstract)
+
     return Paper(
         source_id=source_id,
         external_id=external_id,
         url=url,
         pdf_url=None,
         title=title,
-        authors=extract_authors(entry),
+        authors=authors,
         abstract=abstract,
         categories=extract_categories(entry),
         keywords=[],
