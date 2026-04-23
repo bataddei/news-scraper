@@ -1,0 +1,42 @@
+# systemd template unit for literature collectors.
+# Sibling of news-collector@.service. Kept separate so a failure or restart in
+# one pipeline can't ripple into the other.
+#
+# One instance per literature source:
+#   sudo systemctl enable literature-collector@arxiv_qfin.service
+#
+# Install on droplet:
+#   sudo cp deploy/systemd/literature-collector@.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now literature-collector@<slug>.service
+
+[Unit]
+Description=Literature collector (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=news
+Group=news
+WorkingDirectory=/opt/news-scraper
+EnvironmentFile=/opt/news-scraper/.env
+ExecStart=/opt/news-scraper/.venv/bin/python -m news_archive.literature.collectors.run %i
+Restart=on-failure
+RestartSec=30s
+TimeoutStopSec=30s
+MemoryHigh=256M
+MemoryMax=384M
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=literature-collector-%i
+
+# Hardening (same as news-collector@.service)
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/log/news-pipeline
+
+[Install]
+WantedBy=multi-user.target

@@ -44,5 +44,10 @@ class Settings(BaseSettings):
     discord_webhook_url: SecretStr | None = None
     healthchecks_url: str | None = None
 
+    # Literature triage: OpenAI-powered. Optional at import time so collector
+    # runs (which don't need it) can start without the key being set.
+    openai_api_key: SecretStr | None = None
+    literature_triage_model: str = Field(default="gpt-4o")
+
 
 settings = Settings()  # type: ignore[call-arg]

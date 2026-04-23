@@ -59,6 +59,9 @@ run-ffcal:
 run-gdelt:
 	python -m news_archive.collectors.run gdelt_gkg
 
+run-arxiv:
+	python -m news_archive.literature.collectors.run arxiv_qfin
+
 gap-check:
 	python -m news_archive.scripts.gap_check
 
