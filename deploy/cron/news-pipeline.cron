@@ -45,12 +45,3 @@ PATH=/opt/news-scraper/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/b
 # ---- Week 4: daily integrity report at 08:00 UTC ----
 # Posts to Telegram. Requires TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID in .env.
 0 8 * * *   news cd /opt/news-scraper && .venv/bin/python -m news_archive.scripts.daily_report
-
-# ---- Literature collectors ----
-# arXiv q-fin: once daily at 06:00 UTC. arXiv publishes once per day per
-# category set; hourly polling would be pointless and rude.
-0 6 * * *   news cd /opt/news-scraper && .venv/bin/python -m news_archive.literature.collectors.run arxiv_qfin
-# blog_* and journal_* — added as each collector ships (one at a time, per brief).
-# SSRN — added last (messiest source).
-# Triage pass and daily literature digest — wired up after all four collectors
-# have run cleanly for 24h.
