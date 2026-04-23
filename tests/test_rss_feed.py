@@ -1,8 +1,9 @@
-"""Unit tests for the blog-RSS collector.
+"""Unit tests for the generic RSS/Atom feed collector.
 
-Fixture is a WordPress-shaped RSS 2.0 feed — matches Hudson & Thames,
-Robot Wealth, Quantpedia, etc. Exercises the parser directly; DB and HTTP
-are mocked.
+Fixture is a WordPress-shaped RSS 2.0 feed — representative of the blog
+sources. The same collector class also drives journal RSS (ScienceDirect)
+where the shape is close enough that no separate code path is needed.
+Exercises the parser directly; DB and HTTP are mocked.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from unittest.mock import patch
 
 import feedparser
 
-from news_archive.literature.collectors.blog_rss import (
+from news_archive.literature.collectors.rss_feed import (
     _entry_to_dict,
     _parsed_time_to_utc,
     entry_to_paper,
@@ -148,7 +149,7 @@ class TestEntryToPaper:
         assert paper is None
 
 
-class TestBlogFeedCollector:
+class TestRssFeedCollector:
     """Exercise collect() end-to-end against fixture bytes, with DB+HTTP stubbed."""
 
     def test_collect_yields_two_papers(self) -> None:
@@ -156,14 +157,14 @@ class TestBlogFeedCollector:
             "news_archive.literature.collectors.base.lit_db.get_source_id_by_slug",
             return_value=55,
         ), patch(
-            "news_archive.literature.collectors.blog_rss.lit_db.get_feed_url_by_slug",
+            "news_archive.literature.collectors.rss_feed.lit_db.get_feed_url_by_slug",
             return_value="https://hudsonthames.org/feed/",
         ), patch(
-            "news_archive.literature.collectors.blog_rss.http.fetch_bytes",
+            "news_archive.literature.collectors.rss_feed.http.fetch_bytes",
             return_value=FIXTURE_RSS,
         ):
-            from news_archive.literature.collectors.blog_rss import BlogFeedCollector
-            collector = BlogFeedCollector("blog_hudson_thames")
+            from news_archive.literature.collectors.rss_feed import RssFeedCollector
+            collector = RssFeedCollector("blog_hudson_thames")
             papers = list(collector.collect())
 
         assert len(papers) == 2

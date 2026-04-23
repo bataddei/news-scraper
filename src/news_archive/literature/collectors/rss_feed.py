@@ -1,9 +1,10 @@
-"""Curated quant-blog RSS collector.
+"""Generic RSS/Atom feed collector, parameterized by source slug.
 
-One class, N instances — one per active `blog_*` row in `literature.sources`.
-Adding a new blog is a migration (insert a row with slug + feed_url); no code
-change required. That constraint is why this class is parameterized rather
-than following the news-side pattern of one class per feed.
+One class, N instances — one per active source row in `literature.sources`
+whose `source_type` is 'rss' (currently blogs and journals). Adding a new
+feed is a migration (insert a row with slug + feed_url); no code change
+required. That constraint is why this class is parameterized by slug
+rather than following the news-side pattern of one subclass per feed.
 
 Dedup:
     * external_id = feed entry GUID / id / link (best available).
@@ -15,9 +16,10 @@ Author handling:
     `entry.authors` (list of dicts) for Atom. We coerce to a list[str].
 
 Cross-source duplicates:
-    Quantocracy is an aggregator that republishes Hudson & Thames / Robot
-    Wealth / etc. The same post can appear under multiple source_ids; that is
-    kept on purpose — source identity is signal. Dedup is WITHIN a source.
+    Quantocracy aggregates Hudson & Thames / Robot Wealth / etc., and a
+    paper can appear in both arXiv and a journal feed. The same item under
+    multiple source_ids is kept on purpose — source identity is signal.
+    Dedup is WITHIN a source.
 """
 
 from __future__ import annotations
@@ -159,11 +161,12 @@ def entry_to_paper(
     )
 
 
-class BlogFeedCollector(LitBaseCollector):
+class RssFeedCollector(LitBaseCollector):
     """Parameterized collector — slug + feed_url come from literature.sources.
 
     Instantiation:
-        BlogFeedCollector("blog_hudson_thames").run()
+        RssFeedCollector("blog_hudson_thames").run()
+        RssFeedCollector("journal_jfe").run()
 
     The class does not declare `source_slug` as a class attribute; callers
     pass it to __init__ which sets the instance attribute before the base

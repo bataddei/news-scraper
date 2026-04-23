@@ -4,7 +4,7 @@ Usage:
     python -m news_archive.literature.scripts.run_blogs
 
 Queries literature.sources for slugs matching `blog_%` where active=true,
-and runs each through BlogFeedCollector. Each blog gets its own
+and runs each through RssFeedCollector. Each blog gets its own
 literature.collection_runs row, so gap detection can flag a single dead
 feed without silencing the others.
 
@@ -21,7 +21,7 @@ import sys
 
 from news_archive.db import close_pool
 from news_archive.literature import db as lit_db
-from news_archive.literature.collectors.blog_rss import BlogFeedCollector
+from news_archive.literature.collectors.rss_feed import RssFeedCollector
 from news_archive.logging_config import configure_logging, get_logger
 
 log = get_logger(__name__)
@@ -50,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         for slug in slugs:
             try:
-                run = BlogFeedCollector(slug).run()
+                run = RssFeedCollector(slug).run()
             except Exception as exc:
                 # Base-class run() catches its own exceptions, but __init__ can
                 # fail (e.g. feed_url NULL). Don't let one dead row kill the batch.
