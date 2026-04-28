@@ -36,9 +36,10 @@ PATH=/opt/news-scraper/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/b
 # ForexFactory economic calendar: twice a day (calendar rarely changes intra-day,
 # and upstream refreshes slowly). Events remain stable so dedup absorbs re-runs cheaply.
 45 2,14 * * * news cd /opt/news-scraper && .venv/bin/python -m news_archive.collectors.run econ_calendar_ff
-# GDELT GKG: hourly at :50 (GDELT publishes every 15 minutes; we pull the latest
-# file once per hour and rely on the row filter to keep only macro-relevant news).
-50 * * * *  news cd /opt/news-scraper && .venv/bin/python -m news_archive.collectors.run gdelt_gkg
+# GDELT GKG: every 15 minutes — matches GDELT's publish cadence so we don't
+# miss windows. Each tick produces ~10 rollup rows (one per matched theme/Mag 7
+# bucket) so storage stays tiny even at 4× the cadence.
+*/15 * * * * news cd /opt/news-scraper && .venv/bin/python -m news_archive.collectors.run gdelt_gkg
 # Business Wire, Reuters, AP: public RSS returns 403 or has been sunset. Need a
 # paid feed or alternate access path before enabling.
 
