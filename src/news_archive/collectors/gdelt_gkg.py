@@ -1,41 +1,39 @@
-"""GDELT GKG (Global Knowledge Graph) collector — filtered ingest.
+"""GDELT GKG (Global Knowledge Graph) collector — 15-minute rollup ingest.
 
 GDELT v2 publishes a GKG file every 15 minutes at
 `http://data.gdeltproject.org/gdeltv2/YYYYMMDDHHMMSS.gkg.csv.zip`. Each file
-contains ~1–2k rows, each row being one news article's structured metadata —
-themes, tones, persons, organizations, locations. GDELT does NOT carry the
-article text; it's a knowledge graph about publicly-indexed news.
+contains ~1–2k rows of structured metadata about news articles globally —
+themes, tones, persons, organizations, locations.
 
-Per the brief's filter mandate, we do NOT ingest every GDELT row (tens of
-millions/year unfiltered). We keep rows matching ANY of:
+We do NOT store every row. The "bigness" signal is mention volume, not any
+single article. We aggregate per (15-min file, theme bucket) and write to
+`news_archive.gdelt_rollup_15min`. See migration 0010 for the rationale and
+look-ahead-safe daily view.
 
-    * A theme starting with any of the macro/policy prefixes
-      (ECON_, WB_, EPU_, TAX_FNCACT_FED*, FISCAL_, INFLATION, INTEREST*,
-      MONETARY, UNEMPLOYMENT, EMPLOYMENT*).
-    * An exact theme from a curated allowlist (FOMC, FEDERAL_RESERVE, etc.).
-    * A Mag 7 company-name substring in the URL or Organizations column.
-
-The filter is intentionally conservative on the "cast a wide net for
-macro-relevant news" side and restrictive on consumer/entertainment noise.
-The filter predicate is recorded in `collection_runs.notes` so we can re-run
-with a broader net later if needed (brief, §Week 3, GDELT note).
+Filter is unchanged from the per-article era: keep rows matching ANY of
+    * a theme prefix in `_THEME_PREFIXES`
+    * an exact theme in `_THEME_EXACT`
+    * a Mag 7 company-name substring in URL or organizations
 """
 
 from __future__ import annotations
 
 import csv
 import io
+import traceback
 import zipfile
+from collections import Counter
 from collections.abc import Iterable, Iterator
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
-from news_archive import http
+from news_archive import db, http
 from news_archive.collectors.base import BaseCollector, utcnow
-from news_archive.hashing import content_hash
-from news_archive.models import Article, ArticleEntity
+from news_archive.models import Article, ArticleEntity, CollectionRun, GdeltRollup
 
 LASTUPDATE_URL = "http://data.gdeltproject.org/gdeltv2/lastupdate.txt"
 
@@ -147,6 +145,17 @@ def parse_v21_date(date_str: str | None) -> datetime | None:
         return None
 
 
+def parse_window_start_from_url(gkg_url: str) -> datetime | None:
+    """Pull the 15-min window start from `…/YYYYMMDDHHMMSS.gkg.csv.zip`.
+
+    Used as `window_start` for every rollup row from this file so all rows
+    share the same primary-key prefix and re-runs are idempotent.
+    """
+    leaf = urlparse(gkg_url).path.rsplit("/", 1)[-1]
+    stem = leaf.split(".", 1)[0]
+    return parse_v21_date(stem)
+
+
 def _themes_from_cell(cell: str | None) -> list[str]:
     """V1THEMES is ';'-separated list of theme tokens. Strip empties."""
     if not cell:
@@ -190,6 +199,52 @@ def row_passes_filter(row: dict[str, Any]) -> tuple[bool, str]:
     return False, ""
 
 
+def buckets_for_row(themes: list[str], mag7_tickers: list[str]) -> set[str]:
+    """Map a matched row to one or more rollup buckets.
+
+    A single row contributes to every bucket it touches: e.g. a row about
+    Apple-Inc and an FOMC decision counts in both `MAG7_AAPL` and `FOMC`.
+    """
+    out: set[str] = set()
+    for ticker in mag7_tickers:
+        out.add(f"MAG7_{ticker}")
+
+    if any(t in _THEME_EXACT for t in themes):
+        out.add("FOMC")
+    if any(t.startswith("INFLATION") for t in themes):
+        out.add("INFLATION")
+    if any(t.startswith("INTEREST_RATE") for t in themes):
+        out.add("INTEREST_RATE")
+    if any(t.startswith("MONETARY") for t in themes):
+        out.add("MONETARY")
+    if any(t.startswith("EMPLOYMENT_") or t.startswith("UNEMPLOYMENT") for t in themes):
+        out.add("EMPLOYMENT")
+    if any(t.startswith("FISCAL_") for t in themes):
+        out.add("FISCAL")
+    if any(t.startswith("EPU_") for t in themes):
+        out.add("EPU")
+    if any(t.startswith("WB_") for t in themes):
+        out.add("WB")
+    if any(t.startswith("ECON_") for t in themes):
+        out.add("ECON")
+    return out
+
+
+def parse_overall_tone(tone_cell: str | None) -> float | None:
+    """V15TONE is `tone,positive,negative,polarity,activity,group_ref,word_count`.
+
+    Position 0 is the overall tone score (positive - negative). Returns None
+    if the cell is empty or unparseable.
+    """
+    if not tone_cell:
+        return None
+    head = tone_cell.split(",", 1)[0]
+    try:
+        return float(head)
+    except ValueError:
+        return None
+
+
 def _iter_gkg_rows(csv_bytes: bytes) -> Iterator[dict[str, Any]]:
     """Parse tab-separated GKG CSV into column-named dicts. Streams lines."""
     buf = io.StringIO(csv_bytes.decode("utf-8", errors="replace"))
@@ -208,24 +263,173 @@ def _iter_gkg_rows(csv_bytes: bytes) -> Iterator[dict[str, Any]]:
         yield dict(zip(GKG_COLUMNS, cols, strict=True))
 
 
-def _summarise_themes(themes: list[str], limit: int = 8) -> str:
-    return ", ".join(themes[:limit])
+@dataclass
+class _BucketAcc:
+    """Per-bucket accumulator built up while scanning one GKG file."""
+
+    n_articles: int = 0
+    domain_counts: Counter[str] = field(default_factory=Counter)
+    tones: list[float] = field(default_factory=list)
+    first_url: str | None = None
+
+    def add(self, *, domain: str | None, url: str | None, tone: float | None) -> None:
+        self.n_articles += 1
+        if domain:
+            self.domain_counts[domain] += 1
+        if tone is not None:
+            self.tones.append(tone)
+        if self.first_url is None and url:
+            self.first_url = url
+
+    def to_rollup(
+        self,
+        *,
+        window_start: datetime,
+        fetched_at: datetime,
+        theme_bucket: str,
+    ) -> GdeltRollup:
+        avg = sum(self.tones) / len(self.tones) if self.tones else None
+        top_domain, _ = self.domain_counts.most_common(1)[0] if self.domain_counts else (None, 0)
+        return GdeltRollup(
+            window_start=window_start,
+            fetched_at=fetched_at,
+            theme_bucket=theme_bucket,
+            n_articles=self.n_articles,
+            n_sources=len(self.domain_counts),
+            avg_tone=avg,
+            min_tone=min(self.tones) if self.tones else None,
+            max_tone=max(self.tones) if self.tones else None,
+            top_url=self.first_url,
+            top_domain=top_domain,
+        )
+
+
+def compute_rollups(
+    rows: Iterable[dict[str, Any]],
+    *,
+    window_start: datetime,
+    fetched_at: datetime,
+) -> tuple[list[GdeltRollup], int, int]:
+    """Walk all parsed GKG rows and return rollups + total/kept counts."""
+    accs: dict[str, _BucketAcc] = {}
+    total = 0
+    kept = 0
+    for row in rows:
+        total += 1
+        keep, _ = row_passes_filter(row)
+        if not keep:
+            continue
+        kept += 1
+
+        url = row.get("V2DOCUMENTIDENTIFIER") or None
+        domain = row.get("V2SOURCECOMMONNAME") or None
+        themes = _themes_from_cell(row.get("V1THEMES"))
+        tickers = extract_mag7_tickers(url or "", row.get("V2ENHANCEDORGANIZATIONS"))
+        tone = parse_overall_tone(row.get("V15TONE"))
+
+        for bucket in buckets_for_row(themes, tickers):
+            acc = accs.setdefault(bucket, _BucketAcc())
+            acc.add(domain=domain, url=url, tone=tone)
+
+    rollups = [
+        accs[bucket].to_rollup(
+            window_start=window_start,
+            fetched_at=fetched_at,
+            theme_bucket=bucket,
+        )
+        for bucket in sorted(accs)
+    ]
+    return rollups, total, kept
 
 
 class GdeltGkgCollector(BaseCollector):
+    """Collector for GDELT GKG → news_archive.gdelt_rollup_15min.
+
+    Bypasses BaseCollector.run() because the rollup target schema is
+    different from `articles`. `collect()` exists only to satisfy the
+    abstract method; the real work is in `run()`.
+    """
+
     source_slug = "gdelt_gkg"
     lastupdate_url = LASTUPDATE_URL
 
     def collect(self) -> Iterable[tuple[Article, list[ArticleEntity]]]:
+        """Unused — `run()` is overridden. Returns an empty iterator."""
+        return iter(())
+
+    def run(self, notes: str | None = None) -> CollectionRun:
+        run_record = CollectionRun(
+            source_id=self.source_id,
+            started_at=utcnow(),
+            notes=notes,
+        )
+        run_record.id = db.start_collection_run(run_record)
+        run_log = self.logger.bind(run_id=run_record.id)
+        run_log.info("collection_run.start")
+
+        try:
+            outcome = self._ingest_one_file(run_log)
+            if outcome is None:
+                # No GKG file was available this cycle (e.g. lastupdate not
+                # yet pointing at a fresh URL, or a 404 race). Treat as a
+                # successful no-op so the gap report doesn't flag it.
+                run_record.status = "success"
+                run_record.articles_seen = 0
+                run_record.articles_inserted = 0
+            else:
+                rollups_emitted, kept, total, inserted, duplicate = outcome
+                run_record.articles_seen = kept
+                run_record.articles_inserted = inserted
+                run_record.articles_duplicate = duplicate
+                run_record.status = "success"
+                run_log.info(
+                    "gkg.rollup_summary",
+                    rollups=rollups_emitted,
+                    kept_rows=kept,
+                    total_rows=total,
+                    inserted_buckets=inserted,
+                    duplicate_buckets=duplicate,
+                )
+        except Exception as e:
+            run_record.status = "failed"
+            run_record.error_message = (
+                f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+            )
+            run_log.error("collection_run.failed", error=str(e))
+        finally:
+            run_record.finished_at = utcnow()
+            db.finish_collection_run(run_record)
+            run_log.info(
+                "collection_run.finish",
+                status=run_record.status,
+                seen=run_record.articles_seen,
+                inserted=run_record.articles_inserted,
+                duplicate=run_record.articles_duplicate,
+            )
+        return run_record
+
+    def _ingest_one_file(
+        self, run_log: Any
+    ) -> tuple[int, int, int, int, int] | None:
+        """Download, parse, aggregate, and insert one GKG file.
+
+        Returns (n_rollups, kept_rows, total_rows, inserted_buckets,
+        duplicate_buckets) or None when there's nothing to ingest this cycle.
+        """
         lastupdate_body = http.fetch_bytes(self.lastupdate_url).decode(
             "utf-8", errors="replace"
         )
         gkg_url = pick_latest_gkg_url(lastupdate_body)
         if gkg_url is None:
-            self.logger.warning("gkg.no_url_in_lastupdate", body=lastupdate_body[:200])
-            return
+            run_log.warning("gkg.no_url_in_lastupdate", body=lastupdate_body[:200])
+            return None
 
-        self.logger.info("gkg.downloading", url=gkg_url)
+        window_start = parse_window_start_from_url(gkg_url)
+        if window_start is None:
+            run_log.warning("gkg.window_unparseable", url=gkg_url)
+            return None
+
+        run_log.info("gkg.downloading", url=gkg_url, window_start=str(window_start))
         try:
             zipped = http.fetch_bytes(gkg_url)
         except httpx.HTTPStatusError as e:
@@ -233,8 +437,8 @@ class GdeltGkgCollector(BaseCollector):
             # fully uploaded yet (404 for a few seconds). Skip this cycle; the
             # next cron tick will find the next file ready.
             if e.response.status_code == 404:
-                self.logger.warning("gkg.url_not_ready", url=gkg_url)
-                return
+                run_log.warning("gkg.url_not_ready", url=gkg_url)
+                return None
             raise
         fetched_at = utcnow()
 
@@ -242,77 +446,18 @@ class GdeltGkgCollector(BaseCollector):
             with zipfile.ZipFile(io.BytesIO(zipped)) as z:
                 member_names = z.namelist()
                 if not member_names:
-                    self.logger.warning("gkg.empty_zip", url=gkg_url)
-                    return
+                    run_log.warning("gkg.empty_zip", url=gkg_url)
+                    return None
                 with z.open(member_names[0]) as inner:
                     csv_bytes = inner.read()
         except zipfile.BadZipFile as e:
-            self.logger.warning("gkg.bad_zip", url=gkg_url, error=str(e))
-            return
+            run_log.warning("gkg.bad_zip", url=gkg_url, error=str(e))
+            return None
 
-        total = 0
-        kept = 0
-        for row in _iter_gkg_rows(csv_bytes):
-            total += 1
-            keep, reason = row_passes_filter(row)
-            if not keep:
-                continue
-
-            url = row.get("V2DOCUMENTIDENTIFIER") or None
-            rec_id = row.get("GKGRECORDID") or None
-            published = parse_v21_date(row.get("V21DATE")) or fetched_at
-            domain = row.get("V2SOURCECOMMONNAME") or ""
-            themes = _themes_from_cell(row.get("V1THEMES"))
-            tickers = extract_mag7_tickers(url or "", row.get("V2ENHANCEDORGANIZATIONS"))
-
-            if not url and not rec_id:
-                continue
-
-            # GDELT has no headline — synthesise one so the articles table still
-            # has a human-readable string to grep on. Theme-summary keeps it
-            # backtest-useful.
-            theme_tail = _summarise_themes(themes)
-            headline = f"[{reason.upper()}] {domain} :: {theme_tail}".strip()
-            if len(headline) > 400:
-                headline = headline[:400]
-            body = (
-                f"url={url}\n"
-                f"themes={';'.join(themes)}\n"
-                f"orgs={row.get('V2ENHANCEDORGANIZATIONS') or ''}\n"
-                f"persons={row.get('V2ENHANCEDPERSONS') or ''}\n"
-                f"tone={row.get('V15TONE') or ''}"
-            )
-
-            raw_payload = {
-                "_gdelt_file": gkg_url,
-                "_filter_reason": reason,
-                **{k: v for k, v in row.items() if v},
-            }
-
-            article = Article(
-                source_id=self.source_id,
-                external_id=rec_id,
-                url=url,
-                headline=headline,
-                body=body,
-                source_published_at=published,
-                source_fetched_at=fetched_at,
-                raw_payload=raw_payload,
-                content_hash=content_hash(headline, body),
-                language="en",
-            )
-            entities: list[ArticleEntity] = [
-                ArticleEntity(entity_type="event", entity_value="GDELT"),
-                ArticleEntity(entity_type="org", entity_value="GDELT Project"),
-            ]
-            for t in tickers:
-                entities.append(ArticleEntity(entity_type="ticker", entity_value=t))
-            yield article, entities
-            kept += 1
-
-        self.logger.info(
-            "gkg.file_summary",
-            url=gkg_url,
-            total_rows=total,
-            kept_rows=kept,
+        rollups, total, kept = compute_rollups(
+            _iter_gkg_rows(csv_bytes),
+            window_start=window_start,
+            fetched_at=fetched_at,
         )
+        inserted, duplicate = db.insert_gdelt_rollups(rollups)
+        return len(rollups), kept, total, inserted, duplicate

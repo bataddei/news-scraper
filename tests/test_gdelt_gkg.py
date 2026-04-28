@@ -1,18 +1,22 @@
-"""Unit tests for the GDELT GKG collector."""
+"""Unit tests for the GDELT GKG collector (rollup mode)."""
 
 from __future__ import annotations
 
 import io
-import json
 import zipfile
+from datetime import UTC, datetime
 from unittest.mock import patch
 
 from news_archive.collectors.gdelt_gkg import (
     GKG_COLUMNS,
     LASTUPDATE_URL,
     _iter_gkg_rows,
+    buckets_for_row,
+    compute_rollups,
     extract_mag7_tickers,
+    parse_overall_tone,
     parse_v21_date,
+    parse_window_start_from_url,
     pick_latest_gkg_url,
     row_passes_filter,
     theme_match,
@@ -76,6 +80,17 @@ class TestParseV21Date:
 
     def test_invalid_month(self) -> None:
         assert parse_v21_date("20261321140000") is None
+
+
+class TestParseWindowStartFromUrl:
+    def test_valid_url(self) -> None:
+        dt = parse_window_start_from_url(
+            "http://data.gdeltproject.org/gdeltv2/20260421140000.gkg.csv.zip"
+        )
+        assert dt == datetime(2026, 4, 21, 14, 0, 0, tzinfo=UTC)
+
+    def test_unparseable_returns_none(self) -> None:
+        assert parse_window_start_from_url("http://x/garbage.csv.zip") is None
 
 
 class TestThemeMatch:
@@ -145,6 +160,47 @@ class TestRowPassesFilter:
         assert reason == ""
 
 
+class TestBucketsForRow:
+    def test_fomc_bucket_from_exact_theme(self) -> None:
+        assert "FOMC" in buckets_for_row(["FOMC"], [])
+        assert "FOMC" in buckets_for_row(["FEDERAL_RESERVE"], [])
+
+    def test_inflation_and_interest_rate(self) -> None:
+        b = buckets_for_row(["INFLATION", "INTEREST_RATE_CUT"], [])
+        assert {"INFLATION", "INTEREST_RATE"} <= b
+
+    def test_econ_catchall(self) -> None:
+        b = buckets_for_row(["ECON_STOCKMARKET"], [])
+        assert "ECON" in b
+
+    def test_employment_covers_un_and_employed(self) -> None:
+        assert "EMPLOYMENT" in buckets_for_row(["UNEMPLOYMENT_RATE"], [])
+        assert "EMPLOYMENT" in buckets_for_row(["EMPLOYMENT_PAYROLLS"], [])
+
+    def test_mag7_buckets_per_ticker(self) -> None:
+        b = buckets_for_row([], ["AAPL", "TSLA"])
+        assert {"MAG7_AAPL", "MAG7_TSLA"} <= b
+
+    def test_combined(self) -> None:
+        b = buckets_for_row(["FOMC", "ECON_STOCKMARKET"], ["AAPL"])
+        assert {"FOMC", "ECON", "MAG7_AAPL"} <= b
+
+    def test_empty(self) -> None:
+        assert buckets_for_row([], []) == set()
+
+
+class TestParseOverallTone:
+    def test_first_value_used(self) -> None:
+        assert parse_overall_tone("-1.2,3.4,5.6,2.1,7.0,0,42") == -1.2
+
+    def test_empty_returns_none(self) -> None:
+        assert parse_overall_tone("") is None
+        assert parse_overall_tone(None) is None
+
+    def test_unparseable_returns_none(self) -> None:
+        assert parse_overall_tone("nope") is None
+
+
 class TestIterGkgRows:
     def test_pads_short_rows(self) -> None:
         # Row with fewer columns than GKG_COLUMNS — must be padded, not dropped.
@@ -170,33 +226,190 @@ class TestIterGkgRows:
         assert [r["GKGRECORDID"] for r in rows] == ["A", "B"]
 
 
-class TestCollector:
-    def test_keeps_filtered_rows_only(self) -> None:
-        kept_row = _build_row(
-            GKGRECORDID="KEEP-1",
+class TestComputeRollups:
+    """The aggregation step: rows in → rollup rows out."""
+
+    WINDOW = datetime(2026, 4, 21, 14, 0, 0, tzinfo=UTC)
+    FETCHED = datetime(2026, 4, 21, 14, 1, 30, tzinfo=UTC)
+
+    def _row(self, **overrides: str) -> dict[str, str]:
+        return {col: overrides.get(col, "") for col in GKG_COLUMNS}
+
+    def test_fomc_rollup_aggregates_three_rows(self) -> None:
+        rows = [
+            self._row(
+                V2SOURCECOMMONNAME="reuters.com",
+                V2DOCUMENTIDENTIFIER="https://reuters.com/a",
+                V1THEMES="FOMC",
+                V15TONE="-2.0,1,3,2,5,0,40",
+            ),
+            self._row(
+                V2SOURCECOMMONNAME="reuters.com",
+                V2DOCUMENTIDENTIFIER="https://reuters.com/b",
+                V1THEMES="FOMC;INFLATION",
+                V15TONE="0.0,2,2,4,5,0,40",
+            ),
+            self._row(
+                V2SOURCECOMMONNAME="cnbc.com",
+                V2DOCUMENTIDENTIFIER="https://cnbc.com/c",
+                V1THEMES="FEDERAL_RESERVE",
+                V15TONE="2.0,3,1,4,5,0,40",
+            ),
+        ]
+        rollups, total, kept = compute_rollups(
+            iter(rows), window_start=self.WINDOW, fetched_at=self.FETCHED
+        )
+        assert total == 3
+        assert kept == 3
+
+        by_bucket = {r.theme_bucket: r for r in rollups}
+        assert "FOMC" in by_bucket
+        fomc = by_bucket["FOMC"]
+        assert fomc.n_articles == 3
+        assert fomc.n_sources == 2  # reuters.com + cnbc.com
+        assert fomc.window_start == self.WINDOW
+        assert fomc.fetched_at == self.FETCHED
+        assert fomc.avg_tone == 0.0  # (-2 + 0 + 2) / 3
+        assert fomc.min_tone == -2.0
+        assert fomc.max_tone == 2.0
+        assert fomc.top_domain == "reuters.com"  # most common
+        assert fomc.top_url == "https://reuters.com/a"  # first kept row's URL
+
+        # The INFLATION bucket should also pick up row b.
+        assert "INFLATION" in by_bucket
+        assert by_bucket["INFLATION"].n_articles == 1
+
+    def test_drops_non_matching_rows(self) -> None:
+        rows = [
+            self._row(
+                V2SOURCECOMMONNAME="gossip.example",
+                V2DOCUMENTIDENTIFIER="https://gossip.example/x",
+                V1THEMES="SPORTS;CRIME;TAX_ETHNICITY_GERMAN",
+            ),
+            self._row(
+                V2SOURCECOMMONNAME="reuters.com",
+                V2DOCUMENTIDENTIFIER="https://reuters.com/fed",
+                V1THEMES="FOMC",
+            ),
+        ]
+        rollups, total, kept = compute_rollups(
+            iter(rows), window_start=self.WINDOW, fetched_at=self.FETCHED
+        )
+        assert total == 2
+        assert kept == 1
+        assert {r.theme_bucket for r in rollups} == {"FOMC"}
+
+    def test_mag7_creates_per_ticker_bucket(self) -> None:
+        rows = [
+            self._row(
+                V2SOURCECOMMONNAME="cnbc.com",
+                V2DOCUMENTIDENTIFIER="https://cnbc.com/nvda",
+                V1THEMES="SPORTS",  # only mag7 path matches
+                V2ENHANCEDORGANIZATIONS="NVIDIA Corporation,1",
+            ),
+            self._row(
+                V2SOURCECOMMONNAME="bloomberg.com",
+                V2DOCUMENTIDENTIFIER="https://bloomberg.com/aapl",
+                V1THEMES="SPORTS",
+                V2ENHANCEDORGANIZATIONS="Apple Inc,1",
+            ),
+        ]
+        rollups, total, kept = compute_rollups(
+            iter(rows), window_start=self.WINDOW, fetched_at=self.FETCHED
+        )
+        assert total == 2
+        assert kept == 2
+        buckets = {r.theme_bucket: r for r in rollups}
+        assert "MAG7_NVDA" in buckets
+        assert "MAG7_AAPL" in buckets
+        assert buckets["MAG7_NVDA"].n_articles == 1
+        assert buckets["MAG7_AAPL"].n_articles == 1
+
+    def test_tone_is_optional(self) -> None:
+        rows = [
+            self._row(
+                V2SOURCECOMMONNAME="x.com",
+                V2DOCUMENTIDENTIFIER="https://x.com/a",
+                V1THEMES="FOMC",
+                V15TONE="",  # missing tone
+            ),
+        ]
+        rollups, _, _ = compute_rollups(
+            iter(rows), window_start=self.WINDOW, fetched_at=self.FETCHED
+        )
+        fomc = next(r for r in rollups if r.theme_bucket == "FOMC")
+        assert fomc.avg_tone is None
+        assert fomc.min_tone is None
+        assert fomc.max_tone is None
+
+    def test_empty_input_yields_no_rollups(self) -> None:
+        rollups, total, kept = compute_rollups(
+            iter(()), window_start=self.WINDOW, fetched_at=self.FETCHED
+        )
+        assert rollups == []
+        assert total == 0
+        assert kept == 0
+
+
+class TestCollectorRun:
+    """Exercise GdeltGkgCollector.run() end-to-end with HTTP and DB stubbed.
+
+    Patches reach `db` via `news_archive.collectors.gdelt_gkg.db` (the local
+    binding inside the collector module).
+    """
+
+    def _patch_collector(self, fake_fetch, captured: list | None = None):
+        """Build the stack of context managers the collector's run() needs."""
+        from contextlib import ExitStack
+
+        def fake_insert(rollups):
+            if captured is not None:
+                captured.extend(rollups)
+            return len(rollups), 0
+
+        stack = ExitStack()
+        stack.enter_context(patch(
+            "news_archive.collectors.base.db.get_source_id_by_slug", return_value=7
+        ))
+        stack.enter_context(patch(
+            "news_archive.collectors.gdelt_gkg.http.fetch_bytes",
+            side_effect=fake_fetch,
+        ))
+        stack.enter_context(patch(
+            "news_archive.collectors.gdelt_gkg.db.start_collection_run", return_value=1
+        ))
+        stack.enter_context(patch(
+            "news_archive.collectors.gdelt_gkg.db.finish_collection_run"
+        ))
+        ins = stack.enter_context(patch(
+            "news_archive.collectors.gdelt_gkg.db.insert_gdelt_rollups",
+            side_effect=fake_insert,
+        ))
+        return stack, ins
+
+    def test_emits_rollups_via_db(self) -> None:
+        kept = _build_row(
+            GKGRECORDID="K-1",
             V21DATE="20260421140000",
             V2SOURCECOMMONNAME="reuters.com",
             V2DOCUMENTIDENTIFIER="https://reuters.com/biz/fed",
-            V1THEMES="ECON_INTEREST_RATE;FOMC",
-            V2ENHANCEDORGANIZATIONS="Federal Reserve,1234",
-            V15TONE="-1.2,3.4,5.6",
+            V1THEMES="FOMC;INFLATION",
+            V15TONE="-1.5,2.0,3.5,1.0,5.0,0,40",
         )
-        mag7_row = _build_row(
-            GKGRECORDID="KEEP-2",
+        mag7 = _build_row(
+            GKGRECORDID="K-2",
             V21DATE="20260421140000",
             V2SOURCECOMMONNAME="cnbc.com",
-            V2DOCUMENTIDENTIFIER="https://cnbc.com/nvidia-stuff",
+            V2DOCUMENTIDENTIFIER="https://cnbc.com/nvidia",
             V1THEMES="SPORTS",
             V2ENHANCEDORGANIZATIONS="NVIDIA Corporation,1",
         )
-        drop_row = _build_row(
-            GKGRECORDID="DROP-1",
-            V1THEMES="SPORTS;CRIME;TAX_ETHNICITY_GERMAN",
+        drop = _build_row(
+            GKGRECORDID="D-1",
+            V1THEMES="SPORTS;CRIME",
             V2DOCUMENTIDENTIFIER="https://gossip.example/x",
-            V2ENHANCEDORGANIZATIONS="Acme",
         )
-        csv_bytes = _build_csv_bytes([kept_row, mag7_row, drop_row])
-        zip_bytes = _build_zip_bytes(csv_bytes)
+        zip_bytes = _build_zip_bytes(_build_csv_bytes([kept, mag7, drop]))
 
         def fake_fetch(url: str, **_: object) -> bytes:
             if url == LASTUPDATE_URL:
@@ -205,62 +418,50 @@ class TestCollector:
                 return zip_bytes
             raise AssertionError(f"unexpected url {url}")
 
-        with patch("news_archive.collectors.base.db.get_source_id_by_slug", return_value=7):
-            with patch(
-                "news_archive.collectors.gdelt_gkg.http.fetch_bytes",
-                side_effect=fake_fetch,
-            ):
-                from news_archive.collectors.gdelt_gkg import GdeltGkgCollector
-                results = list(GdeltGkgCollector().collect())
+        captured: list = []
+        stack, _ins = self._patch_collector(fake_fetch, captured=captured)
+        with stack:
+            from news_archive.collectors.gdelt_gkg import GdeltGkgCollector
+            run = GdeltGkgCollector().run()
 
-        assert len(results) == 2
-        by_ext = {a.external_id: (a, ents) for a, ents in results}
-        assert "KEEP-1" in by_ext and "KEEP-2" in by_ext
+        assert run.status == "success"
+        by_bucket = {r.theme_bucket: r for r in captured}
+        assert {"FOMC", "INFLATION", "MAG7_NVDA"} <= set(by_bucket)
+        assert "SPORTS" not in by_bucket  # drop row never produced a bucket
 
-        keep1_article, keep1_ents = by_ext["KEEP-1"]
-        assert keep1_article.source_published_at.tzinfo is not None
-        assert keep1_article.source_fetched_at.tzinfo is not None
-        kinds1 = {e.entity_type for e in keep1_ents}
-        assert {"event", "org"} <= kinds1
-        assert next(e.entity_value for e in keep1_ents if e.entity_type == "event") == "GDELT"
-        # raw_payload must be JSON-safe
-        json.dumps(keep1_article.raw_payload)
+        fomc = by_bucket["FOMC"]
+        assert fomc.window_start == datetime(2026, 4, 21, 14, 0, 0, tzinfo=UTC)
+        assert fomc.fetched_at.tzinfo is not None
+        assert fomc.n_articles == 1
+        assert fomc.top_url == "https://reuters.com/biz/fed"
+        assert fomc.avg_tone == -1.5
 
-        _keep2_article, keep2_ents = by_ext["KEEP-2"]
-        tickers = [e.entity_value for e in keep2_ents if e.entity_type == "ticker"]
-        assert "NVDA" in tickers
-
-    def test_no_gkg_url_noop(self) -> None:
+    def test_no_gkg_url_is_successful_noop(self) -> None:
         def fake_fetch(url: str, **_: object) -> bytes:
             if url == LASTUPDATE_URL:
                 return b"1 a http://x/foo.export.CSV.zip\n"
             raise AssertionError(f"unexpected url {url}")
 
-        with patch("news_archive.collectors.base.db.get_source_id_by_slug", return_value=7):
-            with patch(
-                "news_archive.collectors.gdelt_gkg.http.fetch_bytes",
-                side_effect=fake_fetch,
-            ):
-                from news_archive.collectors.gdelt_gkg import GdeltGkgCollector
-                results = list(GdeltGkgCollector().collect())
+        stack, ins = self._patch_collector(fake_fetch)
+        with stack:
+            from news_archive.collectors.gdelt_gkg import GdeltGkgCollector
+            run = GdeltGkgCollector().run()
+        assert run.status == "success"
+        assert run.articles_inserted == 0
+        ins.assert_not_called()
 
-        assert results == []
-
-    def test_bad_zip_noop(self) -> None:
+    def test_bad_zip_is_successful_noop(self) -> None:
         def fake_fetch(url: str, **_: object) -> bytes:
             if url == LASTUPDATE_URL:
                 return LASTUPDATE_BODY.encode("utf-8")
             return b"not a zip"
 
-        with patch("news_archive.collectors.base.db.get_source_id_by_slug", return_value=7):
-            with patch(
-                "news_archive.collectors.gdelt_gkg.http.fetch_bytes",
-                side_effect=fake_fetch,
-            ):
-                from news_archive.collectors.gdelt_gkg import GdeltGkgCollector
-                results = list(GdeltGkgCollector().collect())
-
-        assert results == []
+        stack, ins = self._patch_collector(fake_fetch)
+        with stack:
+            from news_archive.collectors.gdelt_gkg import GdeltGkgCollector
+            run = GdeltGkgCollector().run()
+        assert run.status == "success"
+        ins.assert_not_called()
 
 
 def test_lastupdate_url_constant() -> None:

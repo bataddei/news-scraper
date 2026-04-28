@@ -48,6 +48,34 @@ class ArticleEntity(BaseModel):
     confidence: float | None = None
 
 
+class GdeltRollup(BaseModel):
+    """One row destined for `news_archive.gdelt_rollup_15min`.
+
+    Aggregates all matched GDELT GKG rows in a single 15-min file that
+    belong to one theme/mag7 bucket.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    window_start: datetime
+    fetched_at: datetime
+    theme_bucket: str = Field(min_length=1, max_length=64)
+    n_articles: int = Field(ge=1)
+    n_sources: int = Field(ge=1)
+    avg_tone: float | None = None
+    min_tone: float | None = None
+    max_tone: float | None = None
+    top_url: str | None = None
+    top_domain: str | None = None
+
+    @field_validator("window_start", "fetched_at")
+    @classmethod
+    def _require_tz_aware(cls, v: datetime) -> datetime:
+        if v.tzinfo is None:
+            raise ValueError("timestamp must be timezone-aware (UTC preferred)")
+        return v
+
+
 class CollectionRun(BaseModel):
     """In-memory view of a `news_archive.collection_runs` row during a collector invocation."""
 

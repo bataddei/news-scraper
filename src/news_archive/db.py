@@ -18,7 +18,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
 from news_archive.config import settings
-from news_archive.models import Article, ArticleEntity, CollectionRun
+from news_archive.models import Article, ArticleEntity, CollectionRun, GdeltRollup
 
 _pool: ConnectionPool | None = None
 
@@ -189,6 +189,53 @@ def insert_article(article: Article, entities: list[ArticleEntity] | None = None
             )
         conn.commit()
         return new_id
+
+
+# ---------------------------------------------------------------------------
+# gdelt rollups
+# ---------------------------------------------------------------------------
+
+def insert_gdelt_rollups(rollups: list[GdeltRollup]) -> tuple[int, int]:
+    """Insert rollup rows. Returns (inserted, duplicate).
+
+    PK = (window_start, theme_bucket). Re-running the collector on the same
+    GKG file is a no-op via ON CONFLICT DO NOTHING — every duplicate is
+    counted but not rewritten.
+    """
+    if not rollups:
+        return 0, 0
+
+    inserted = 0
+    with connection() as conn, conn.cursor() as cur:
+        for r in rollups:
+            cur.execute(
+                """
+                insert into news_archive.gdelt_rollup_15min
+                    (window_start, fetched_at, theme_bucket,
+                     n_articles, n_sources,
+                     avg_tone, min_tone, max_tone,
+                     top_url, top_domain)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                on conflict (window_start, theme_bucket) do nothing
+                returning 1
+                """,
+                (
+                    r.window_start,
+                    r.fetched_at,
+                    r.theme_bucket,
+                    r.n_articles,
+                    r.n_sources,
+                    r.avg_tone,
+                    r.min_tone,
+                    r.max_tone,
+                    r.top_url,
+                    r.top_domain,
+                ),
+            )
+            if cur.fetchone() is not None:
+                inserted += 1
+        conn.commit()
+    return inserted, len(rollups) - inserted
 
 
 def fetch_article_by_id(article_id: int) -> dict[str, Any] | None:
