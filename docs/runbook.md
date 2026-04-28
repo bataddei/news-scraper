@@ -15,10 +15,11 @@ Procedures for running and maintaining the news archive. Written in plain langua
 7. [Gap detection](#gap-detection)
 8. [Healthcheck heartbeat](#healthcheck-heartbeat)
 9. [Deploying a code change to the droplet](#deploying-a-code-change-to-the-droplet)
-10. [Backup and restore drill](#backup-and-restore-drill)
-11. [Rotating credentials](#rotating-credentials)
-12. [Provisioning the DigitalOcean droplet](#provisioning-the-digitalocean-droplet)
-13. [Resizing the droplet](#resizing-the-droplet)
+10. [Cleaning up GDELT article orphans](#cleaning-up-gdelt-article-orphans)
+11. [Backup and restore drill](#backup-and-restore-drill)
+12. [Rotating credentials](#rotating-credentials)
+13. [Provisioning the DigitalOcean droplet](#provisioning-the-digitalocean-droplet)
+14. [Resizing the droplet](#resizing-the-droplet)
 
 ---
 
@@ -274,6 +275,39 @@ Run `make gap-check` on the droplet after deploying to confirm nothing regressed
 ### Rollback
 
 If a deploy breaks a collector, `sudo -u news git log --oneline -10`, pick the last good SHA, `sudo -u news git checkout <sha>`, repeat the migration/cron/systemd steps above with the old files. Then fix forward on a fresh commit rather than leaving the droplet in detached HEAD.
+
+---
+
+## Cleaning up GDELT article orphans
+
+Unlike every other source, GDELT writes to `news_archive.gdelt_rollup_15min`, not the `articles` table. If an older version of the collector ever runs against the live DB — e.g. the deploy gap between cleanup and `git pull`, or someone running a stale checkout by hand — it will insert per-article GDELT rows into `articles` that don't belong there. Left in place, those orphans bloat the table, distort source-row counts, and aren't visible to the rollup-driven premarket query.
+
+### Detect
+
+In Supabase SQL editor or `psql`:
+
+```sql
+select count(*), min(source_fetched_at), max(source_fetched_at)
+from news_archive.articles
+where source_id = (select id from news_archive.sources where slug = 'gdelt_gkg');
+```
+
+A non-zero count means there are orphans. The fetch-time range tells you which run(s) inserted them — useful for tracing how the stale code got run.
+
+### Sweep
+
+From your laptop (uses `SUPABASE_DB_URL` from `.env`, so it acts on the live DB):
+
+```bash
+python -m news_archive.scripts.backfill_gdelt_rollups --rollup --delete --vacuum
+```
+
+What each stage does:
+1. **`--rollup`** — aggregates every orphan row into `gdelt_rollup_15min`. Bucket logic mirrors the live collector (FOMC / INFLATION / MAG7_<ticker> / etc.). `INSERT ... ON CONFLICT DO NOTHING`, so existing rollup windows are no-ops.
+2. **`--delete`** — removes orphan article rows in batches of 5,000. `article_entities` cascade-deletes via the FK.
+3. **`--vacuum`** — VACUUM FULL on `articles` + `article_entities` to reclaim the TOAST. Runs through the Supabase pooler with `autocommit=True`.
+
+Idempotent — safe to run anytime. Exits in seconds when there's nothing to clean. Run after every deploy that touches GDELT-related code, just to be safe.
 
 ---
 
